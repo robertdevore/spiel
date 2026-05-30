@@ -7,9 +7,9 @@ A step-by-step guide for getting thoughts out of your head and into text whereve
 ## Quick Start
 
 1. Launch Spiel
-1. Press **Cmd+Shift+S** to start recording
+1. Press **Cmd+Option+.** to start recording
 2. Speak your thoughts
-3. Press **Cmd+Shift+S** again to stop
+3. Press **Cmd+Option+.** again to stop
 5. Click **Transcribe** to convert speech to text
 6. Click **Cleanup** to polish the transcript
 7. Click **Copy** then **Cmd+V / Ctrl+V** to paste at your cursor
@@ -41,9 +41,9 @@ hotkey → talk → transcript → cleaned text → inserted at cursor
 
 ### Step 1: Record Audio
 
-- Press **Cmd+Shift+S** to start recording (or click the **Start Recording** button)
+- Press **Cmd+Option+.** to start recording (or click the **Start Recording** button)
 - A live elapsed timer appears while recording
-- Press **Cmd+Shift+S** again to stop (or click **Stop Recording**)
+- Press **Cmd+Option+.** again to stop (or click **Stop Recording**)
 - After stopping, you'll see metadata: filename, duration, file size, sample rate
 
 ### Step 2: Transcribe
@@ -129,7 +129,7 @@ Open **Settings** to configure Spiel.
 
 ### General
 
-- **Hotkey**: Change the global shortcut (default: Cmd+Shift+S)
+- **Hotkey**: Change the global shortcut (default: Cmd+Option+.)
 - **Default Transcription Engine**: mock, local_whisper, or openai
 - **Default Text Mode**: Your preferred cleanup mode
 - **Default Cleanup Provider**: basic, mock_ai, or openai
@@ -222,7 +222,7 @@ OpenAI transcription and cleanup are **off by default** and require explicit set
 
 | Shortcut | Action |
 |----------|--------|
-| **Cmd+Shift+S** | Start / Stop recording |
+| **Cmd+Option+.** | Start / Stop recording |
 | **Cmd+V / Ctrl+V** | Paste copied text at cursor |
 
 ---
@@ -249,7 +249,7 @@ Add your API key in Settings, then click Validate.
 
 ### "Hotkey not registered"
 
-Another app may be using Cmd+Shift+S. Change the shortcut in Settings.
+Another app may be using Cmd+Option+.. Change the shortcut in Settings.
 
 ### "Recording failed"
 

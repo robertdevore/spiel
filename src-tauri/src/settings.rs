@@ -32,7 +32,7 @@ pub struct SpielSettings {
 impl Default for SpielSettings {
     fn default() -> Self {
         Self {
-            hotkey: "Cmd+Shift+S".into(),
+            hotkey: "Cmd+Option+.".into(),
             history_enabled: true,
             clipboard_restore_enabled: true,
             default_transcription_engine: "mock".into(),

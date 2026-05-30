@@ -85,7 +85,7 @@ This produces platform-specific binaries in `src-tauri/target/release/bundle/`.
 
 ### Core Features
 - [ ] App launches and shows "Spiel" title
-- [ ] Global hotkey (Cmd+Shift+S) registers
+- [ ] Global hotkey (Cmd+Option+.) registers
 - [ ] Start recording via button
 - [ ] Stop recording via button
 - [ ] Recording metadata displays (file, duration, size)

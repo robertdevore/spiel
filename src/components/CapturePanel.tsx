@@ -339,7 +339,7 @@ export default function CapturePanel({
 
   const shortcutLabel = hotkeyStatus
     ? normalizeShortcutLabel(hotkeyStatus.shortcut)
-    : "Cmd+Shift+S";
+    : "Cmd+Option+.";
 
   const isRegistered = hotkeyStatus?.registered ?? false;
 

@@ -3,7 +3,7 @@ import type { HotkeyBehavior } from "./types";
 /**
  * Default hotkey configuration for Spiel Phase 2.
  *
- * Cross-platform default: Cmd+Shift+S
+ * Cross-platform default: Cmd+Option+.
  * This works on macOS, Windows, and Linux.
  *
  * macOS note: Option+Space is often reserved by Spotlight/Alfred.
@@ -11,10 +11,10 @@ import type { HotkeyBehavior } from "./types";
  */
 
 /** The default shortcut string (cross-platform) */
-export const DEFAULT_HOTKEY = "Cmd+Shift+S";
+export const DEFAULT_HOTKEY = "Cmd+Option+.";
 
 /** Human-readable shortcut label for display */
-export const DEFAULT_HOTKEY_LABEL = "Cmd+Shift+S";
+export const DEFAULT_HOTKEY_LABEL = "Cmd+Option+.";
 
 /** Default hotkey behavior (toggle: press once to start, press again to stop) */
 export const DEFAULT_HOTKEY_BEHAVIOR: HotkeyBehavior = "toggle";

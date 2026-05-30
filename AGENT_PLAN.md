@@ -134,7 +134,7 @@ Add 1 new permission:
 | Permission | Phase | Purpose |
 |-----------|-------|---------|
 | core:default | 1 | Tauri runtime |
-| global-shortcut:default | 2 | Cmd+Shift+S hotkey |
+| global-shortcut:default | 2 | Cmd+Option+. hotkey |
 | clipboard-manager:default | 4 | Clipboard read/write |
 
 No network, shell, updater, filesystem, or accessibility permissions. ✅
