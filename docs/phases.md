@@ -14,7 +14,7 @@
 - Elapsed timer (200ms polling while recording)
 - Last recording metadata card (file, duration, size, quality, device)
 - Error handling: no mic, permission denied, duplicate start, stop while idle
-- Hotkey integration: Alt+Shift+Space toggles real recording
+- Hotkey integration: Ctrl+Shift+Space toggles real recording
 
 **Known limitations**:
 - Temp files not auto-cleaned
@@ -29,7 +29,7 @@
 
 ## Phase 2: Global Hotkey ✅ Current
 
-**Goal**: Register a global hotkey (Alt+Shift+Space) that toggles placeholder recording state.
+**Goal**: Register a global hotkey (Ctrl+Shift+Space) that toggles placeholder recording state.
 
 **Status**: ✅ Complete. Default shortcut registered via `tauri-plugin-global-shortcut`. Toggle mode working. UI displays registration status, trigger count, and last-triggered timestamp.
 
@@ -222,7 +222,7 @@
 - 9 workflow commands: start/stop_workflow_recording, run_workflow_transcription, run_workflow_cleanup, insert_workflow_final_text, save_workflow_to_history, cancel_workflow, get_workflow_status, reset_workflow
 - Database migration v3 for workflow settings columns
 - WorkflowPanel.tsx: guided step-by-step UI with active/complete/error states
-- Hotkey integration: Alt+Shift+Space updates WorkflowState on start/stop
+- Hotkey integration: Ctrl+Shift+Space updates WorkflowState on start/stop
 
 **Known limitations**:
 - Auto-insert defaults to off (safety feature)

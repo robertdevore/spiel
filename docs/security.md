@@ -64,7 +64,7 @@ Spiel is **local-first and local-only by default**. No data leaves your device.
 | Capability | Justification |
 |-----------|---------------|
 | core:default | Tauri runtime |
-| global-shortcut:default | Alt+Shift+Space recording toggle |
+| global-shortcut:default | Ctrl+Shift+Space recording toggle |
 | clipboard-manager:default | Text copy/paste for insertion |
 
 No network, shell, filesystem, updater, or accessibility permissions.

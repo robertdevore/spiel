@@ -67,7 +67,7 @@ Each system capability requires explicit Tauri permissions declared in `capabili
 Current permissions (3 total, all justified):
 
 - `core:default` — Phase 1: Tauri runtime
-- `global-shortcut:default` — Phase 2: Alt+Shift+Space hotkey
+- `global-shortcut:default` — Phase 2: Ctrl+Shift+Space hotkey
 - `clipboard-manager:default` — Phase 4: Text copy/paste for insertion
 
 No network, shell, filesystem, updater, or accessibility permissions.

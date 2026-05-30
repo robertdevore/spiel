@@ -3,7 +3,7 @@ import type { HotkeyBehavior } from "./types";
 /**
  * Default hotkey configuration for Spiel Phase 2.
  *
- * Cross-platform default: Alt+Shift+Space
+ * Cross-platform default: Ctrl+Shift+Space
  * This works on macOS, Windows, and Linux.
  *
  * macOS note: Option+Space is often reserved by Spotlight/Alfred.
@@ -11,10 +11,10 @@ import type { HotkeyBehavior } from "./types";
  */
 
 /** The default shortcut string (cross-platform) */
-export const DEFAULT_HOTKEY = "Alt+Shift+Space";
+export const DEFAULT_HOTKEY = "Ctrl+Shift+Space";
 
 /** Human-readable shortcut label for display */
-export const DEFAULT_HOTKEY_LABEL = "Alt+Shift+Space";
+export const DEFAULT_HOTKEY_LABEL = "Ctrl+Shift+Space";
 
 /** Default hotkey behavior (toggle: press once to start, press again to stop) */
 export const DEFAULT_HOTKEY_BEHAVIOR: HotkeyBehavior = "toggle";
