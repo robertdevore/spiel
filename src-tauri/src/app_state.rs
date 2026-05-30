@@ -29,7 +29,7 @@ pub struct HotkeyState {
 impl Default for HotkeyState {
     fn default() -> Self {
         Self {
-            shortcut: "Control+Alt+Space".into(),
+            shortcut: "Alt+Shift+Space".into(),
             registered: false,
             error: None,
             last_triggered: None,

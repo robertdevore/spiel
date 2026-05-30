@@ -339,7 +339,7 @@ export default function CapturePanel({
 
   const shortcutLabel = hotkeyStatus
     ? normalizeShortcutLabel(hotkeyStatus.shortcut)
-    : "Ctrl+Alt+Space";
+    : "Alt+Shift+Space";
 
   const isRegistered = hotkeyStatus?.registered ?? false;
 
