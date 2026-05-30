@@ -1,0 +1,38 @@
+# ── Node / Frontend ──────────────────────────────────────────
+node_modules/
+dist/
+
+# ── Rust / Tauri ────────────────────────────────────────────
+src-tauri/target/
+src-tauri/gen/
+
+# ── OS metadata ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Editor / IDE ────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Environment / Secrets ───────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Build artifacts ─────────────────────────────────────────
+*.tsbuildinfo
+*.log
+npm-debug.log*
+
+# ── macOS bundles (not committed) ───────────────────────────
+*.app
+*.dmg
+
+# ── Spiel-specific ──────────────────────────────────────────
+spiel_history.db
+spiel_history.db-wal
+spiel_history.db-shm
