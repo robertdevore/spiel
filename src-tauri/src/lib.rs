@@ -24,10 +24,10 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 
 /// Platform-appropriate default hotkey for Spiel.
 fn default_shortcut() -> Shortcut {
-    Shortcut::new(Some(Modifiers::CONTROL.union(Modifiers::SHIFT)), Code::Space)
+    Shortcut::new(Some(Modifiers::SUPER.union(Modifiers::SHIFT)), Code::KeyS)
 }
 
-const DEFAULT_SHORTCUT_LABEL: &str = "Ctrl+Shift+Space";
+const DEFAULT_SHORTCUT_LABEL: &str = "Cmd+Shift+S";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

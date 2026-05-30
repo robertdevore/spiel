@@ -4,7 +4,7 @@
 
 ### Verified
 - Tauri v2 runtime ✅
-- Global hotkey (Ctrl+Shift+Space) ✅
+- Global hotkey (Cmd+Shift+S) ✅
 - Microphone recording (CPAL) ✅
 - Clipboard read/write ✅
 - Local Whisper process invocation ✅

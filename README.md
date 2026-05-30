@@ -18,7 +18,7 @@ Phase 11 prepares Spiel for reliable local builds and future distribution. Build
 
 - ✅ Tauri v2 project compiles and builds cleanly (Rust + TypeScript + Vite)
 - ✅ React + TypeScript frontend renders in browser dev mode
-- ✅ **Global hotkey: Ctrl+Shift+Space** toggles real microphone recording
+- ✅ **Global hotkey: Cmd+Shift+S** toggles real microphone recording
 - ✅ **Real microphone recording** via CPAL — saves WAV files to temp directory
 - ✅ **Clipboard copy and insert** — editable text, copy/paste with clipboard save/restore
 - ✅ Hotkey registration status and trigger counter displayed in UI
@@ -56,7 +56,7 @@ Phase 11 prepares Spiel for reliable local builds and future distribution. Build
 | Frontend | React 18 + TypeScript |
 | Build Tool | Vite 6 |
 | Styling | Plain CSS (dark theme) |
-| Hotkeys | Tauri global shortcut plugin (Ctrl+Shift+Space) |
+| Hotkeys | Tauri global shortcut plugin (Cmd+Shift+S) |
 | Audio | CPAL + hound (WAV output to temp dir) |
 | Clipboard | Tauri clipboard manager (text read/write, manual paste) |
 | Transcription | Mock engine + Local Whisper (whisper.cpp) + trait-based abstraction |
@@ -194,7 +194,7 @@ Spiel is designed to be **local-first and privacy-respecting**:
 
 - [ ] App launches without errors (`npm run tauri dev`)
 - [ ] Hotkey registration status shows green dot (registered)
-- [ ] Pressing Ctrl+Shift+Space toggles state between Idle and Recording
+- [ ] Pressing Cmd+Shift+S toggles state between Idle and Recording
 - [ ] Trigger count increments on each press
 - [ ] Hotkey works when another app is focused
 - [ ] UI renders all sections (header, capture, modes, transcript, history, settings, privacy)

@@ -23,7 +23,7 @@
 - ✅ Tauri v2 project compiles and builds cleanly
 - ✅ React + TypeScript + Vite frontend with dark theme
 - ✅ Rust backend with **44 Tauri commands** across 14 modules
-- ✅ Global hotkey: Ctrl+Shift+Space toggles real microphone recording
+- ✅ Global hotkey: Cmd+Shift+S toggles real microphone recording
 - ✅ Real microphone recording via CPAL (WAV to temp dir)
 - ✅ Clipboard copy/insert with clipboard save/restore
 - ✅ Mock transcription engine + Local Whisper (whisper.cpp) engine
@@ -97,7 +97,7 @@ cd src-tauri && cargo fmt --check && cargo check && cargo build
 | Permission | Phase | Justification |
 |-----------|-------|---------------|
 | core:default | 1 | Tauri runtime |
-| global-shortcut:default | 2 | Ctrl+Shift+Space hotkey |
+| global-shortcut:default | 2 | Cmd+Shift+S hotkey |
 | clipboard-manager:default | 4 | Text copy/paste for insertion |
 
 ✅ No network, shell, filesystem, updater, or accessibility permissions.

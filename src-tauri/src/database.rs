@@ -103,7 +103,7 @@ impl Database {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS app_settings (
                     id INTEGER PRIMARY KEY,
-                    hotkey TEXT NOT NULL DEFAULT 'Ctrl+Shift+Space',
+                    hotkey TEXT NOT NULL DEFAULT 'Cmd+Shift+S',
                     history_enabled INTEGER NOT NULL DEFAULT 1,
                     clipboard_restore_enabled INTEGER NOT NULL DEFAULT 1,
                     default_transcription_engine TEXT NOT NULL DEFAULT 'mock',

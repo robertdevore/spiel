@@ -222,13 +222,13 @@ All acceptance criteria met. No blocking issues. Ready for Phase 8.
 - `src-tauri/capabilities/default.json` — added `global-shortcut:default` permission
 
 **Rust Backend:**
-- `src-tauri/src/lib.rs` — registered global shortcut plugin; set up Ctrl+Shift+Space shortcut in `setup()`; emits `hotkey-triggered` event on press; added `chrono_now_iso()` and `civil_from_days()` helpers for timestamp generation; imported `tauri::Emitter` and `tauri::Manager` traits
+- `src-tauri/src/lib.rs` — registered global shortcut plugin; set up Cmd+Shift+S shortcut in `setup()`; emits `hotkey-triggered` event on press; added `chrono_now_iso()` and `civil_from_days()` helpers for timestamp generation; imported `tauri::Emitter` and `tauri::Manager` traits
 - `src-tauri/src/commands.rs` — added `get_hotkey_status` command returning `HotkeyState`; updated phase strings to "Phase 2 — Global Hotkey Foundation"
 - `src-tauri/src/app_state.rs` — added `HotkeyState` struct with shortcut, registered, error, last_triggered, trigger_count fields; changed AppState from derive(Default) to manual Default impl with Mutex\<HotkeyState\>; updated `global_hotkey` capability to "implemented"
 
 **Frontend:**
 - `src/lib/types.ts` — added `HotkeyStatus`, `HotkeyBehavior` types
-- `src/lib/hotkeys.ts` — NEW: default hotkey config (`Ctrl+Shift+Space`), `getDefaultHotkeyLabel()`, `normalizeShortcutLabel()`, `formatLastTriggered()`, `formatTriggerCount()` helpers
+- `src/lib/hotkeys.ts` — NEW: default hotkey config (`Cmd+Shift+S`), `getDefaultHotkeyLabel()`, `normalizeShortcutLabel()`, `formatLastTriggered()`, `formatTriggerCount()` helpers
 - `src/lib/api.ts` — added `getHotkeyStatus()` invoke wrapper
 - `src/App.tsx` — added `hotkeyStatus` state; listens for `hotkey-triggered` Tauri events; polls hotkey status every 5s as fallback; passes `hotkeyStatus` to CapturePanel; wrapped `handleStateChange` in `useCallback`
 - `src/components/CapturePanel.tsx` — accepts `hotkeyStatus` prop; displays registration status (green/red dot), shortcut label, error message, trigger count, last triggered time; added Phase 2 notice explaining no audio/transcription yet
@@ -322,7 +322,7 @@ All acceptance criteria met. No blocking issues. Ready for Phase 8.
 ### Architecture Decisions
 1. **CPAL channel-based architecture**: CPAL `Stream` is not `Send`, so can't be stored in Tauri managed state. Recording spawns a background thread that owns the stream; communication via `mpsc` channels (stop signal in, samples out).
 2. **WAV via hound**: Simple, well-tested crate. Writes 16-bit PCM WAV files to system temp directory.
-3. **Hotkey → real recording**: Ctrl+Shift+Space now toggles actual microphone recording (previously toggled placeholder state only).
+3. **Hotkey → real recording**: Cmd+Shift+S now toggles actual microphone recording (previously toggled placeholder state only).
 4. **Temp files**: Written to `$TMPDIR/spiel_recording_<unix_ts>.wav`. Not auto-cleaned (future phase).
 
 ### Compiler Fixes
