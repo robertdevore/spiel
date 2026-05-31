@@ -17,21 +17,27 @@ struct TranscriptEvent {
 }
 
 /// Push the current status to the UI and reflect it in the menu-bar title.
+///
+/// Safe to call from any thread: `emit` is thread-safe, and the tray title update (an
+/// NSStatusItem mutation) is marshaled onto the main thread, which macOS requires.
 pub fn emit_status(app: &AppHandle) {
     let state = app.state::<AppState>();
     let snap = state.snapshot();
+    let _ = app.emit("status", snap.clone());
 
-    if let Some(tray) = app.tray_by_id("main") {
-        let title = match snap.phase {
-            Phase::Recording => "● Rec",
-            Phase::Transcribing => "… ",
-            Phase::Inserting => "↧ ",
-            _ => "",
-        };
-        let _ = tray.set_title(Some(title));
-    }
-
-    let _ = app.emit("status", snap);
+    let phase = snap.phase;
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(tray) = app.tray_by_id("main") {
+            let title = match phase {
+                Phase::Recording => "● Rec",
+                Phase::Transcribing => "… ",
+                Phase::Inserting => "↧ ",
+                _ => "",
+            };
+            let _ = tray.set_title(Some(title));
+        }
+    });
 }
 
 /// Start recording if idle, or stop-and-process if already recording.
@@ -151,27 +157,30 @@ fn process_capture(app: &AppHandle, capture: audio::Capture) {
         (c.auto_paste, c.restore_clipboard)
     };
 
-    match insert::insert(&text, auto_paste, restore) {
-        Ok(outcome) => {
-            {
-                let mut s = state.status.lock().unwrap();
-                s.needs_accessibility = outcome.needs_accessibility;
+    // Clipboard access and Cmd+V synthesis go through AppKit/CoreGraphics, which must run
+    // on the main thread — doing this on the worker thread crashes the app. Marshal it.
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let state = app.state::<AppState>();
+        match insert::insert(&text, auto_paste, restore) {
+            Ok(outcome) => {
+                state.status.lock().unwrap().needs_accessibility = outcome.needs_accessibility;
+                let message = if outcome.needs_accessibility {
+                    Some("Text copied. Grant Accessibility in Settings to auto-paste.".into())
+                } else if outcome.clipboard_only {
+                    Some("Text copied to clipboard. Press Cmd+V to paste.".into())
+                } else {
+                    None
+                };
+                state.set_phase(Phase::Idle, message);
+                let _ = app.emit("transcript", TranscriptEvent { text, outcome });
             }
-            let message = if outcome.needs_accessibility {
-                Some("Text copied. Grant Accessibility in Settings to auto-paste.".into())
-            } else if outcome.clipboard_only {
-                Some("Text copied to clipboard. Press Cmd+V to paste.".into())
-            } else {
-                None
-            };
-            state.set_phase(Phase::Idle, message);
-            let _ = app.emit("transcript", TranscriptEvent { text, outcome });
+            Err(e) => {
+                state.set_phase(Phase::Error, Some(e.to_string()));
+            }
         }
-        Err(e) => {
-            state.set_phase(Phase::Error, Some(e.to_string()));
-        }
-    }
-    emit_status(app);
+        emit_status(&app);
+    });
 }
 
 /// Return the cached model context, loading (and caching) it if absent or stale.
