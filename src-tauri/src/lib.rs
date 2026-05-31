@@ -94,7 +94,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .item(&quit)
         .build()?;
 
-    let mut builder = TrayIconBuilder::with_id("main")
+    TrayIconBuilder::with_id("main")
+        // A monochrome mic, rendered as a macOS template image so it adapts to the
+        // light/dark menu bar automatically.
+        .icon(tauri::include_image!("icons/tray-mic.png"))
+        .icon_as_template(true)
         .tooltip("Spiel")
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -103,11 +107,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "settings" => dictation::show_settings_window(app),
             "quit" => app.exit(0),
             _ => {}
-        });
-    if let Some(icon) = app.default_window_icon().cloned() {
-        builder = builder.icon(icon);
-    }
-    builder.build(app)?;
+        })
+        .build(app)?;
     Ok(())
 }
 
