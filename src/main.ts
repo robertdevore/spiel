@@ -267,6 +267,12 @@ function settingsCard(c: Config): HTMLElement {
   card.appendChild(
     textField("Hotkey", c.hotkey, (v) => saveConfig({ hotkey: v }), "e.g. Cmd+Alt+D"),
   );
+  const hkHint = document.createElement("div");
+  hkHint.className = "privacy";
+  hkHint.textContent =
+    "Modifiers + a key, e.g. Cmd+Alt+D or Cmd+Shift+Space (letters/named keys only — '?' won't work). " +
+    "Trigger dictation with the hotkey, not the menu-bar Start/Stop: clicking the menu bar moves focus off your text field, so auto-paste has nowhere to land.";
+  card.appendChild(hkHint);
 
   const langWrap = document.createElement("label");
   langWrap.className = "field";

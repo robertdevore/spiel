@@ -60,6 +60,12 @@ pub fn update_config(
         (c.hotkey.clone(), c.model.clone())
     };
 
+    // Reject an unregistrable hotkey before persisting anything, so the saved value and
+    // the actually-registered shortcut never disagree.
+    if validated.hotkey != old_hotkey {
+        crate::validate_hotkey(&validated.hotkey).map_err(to_command_error)?;
+    }
+
     validated
         .save(&state.paths.config_file)
         .map_err(to_command_error)?;

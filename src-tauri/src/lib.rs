@@ -21,7 +21,7 @@ use std::str::FromStr;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -47,7 +47,11 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             build_tray(&handle)?;
-            register_hotkey(&handle, &hotkey).map_err(|e| std::io::Error::other(e.to_string()))?;
+            // If a saved hotkey is invalid/taken, fall back to the default rather than
+            // failing startup — the app must still come up so the user can fix it.
+            if register_hotkey(&handle, &hotkey).is_err() {
+                let _ = register_hotkey(&handle, &Config::default().hotkey);
+            }
 
             // Closing the settings window hides it; the app keeps running in the menu bar.
             if let Some(win) = app.get_webview_window("main") {
@@ -109,7 +113,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 /// (Re)register the global toggle hotkey. Replaces any previously registered shortcut.
 pub fn register_hotkey(app: &tauri::AppHandle, spec: &str) -> error::Result<()> {
-    let shortcut = parse_shortcut(spec);
+    let shortcut = parse_shortcut(spec)?;
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
     gs.on_shortcut(shortcut, move |app, _shortcut, event| {
@@ -118,14 +122,24 @@ pub fn register_hotkey(app: &tauri::AppHandle, spec: &str) -> error::Result<()> 
         }
     })
     .map_err(|e| {
-        error::SpielError::Other(format!(
-            "Could not register hotkey '{spec}': {e}. It may be in use by another app."
+        error::SpielError::Config(format!(
+            "Could not register hotkey '{spec}': {e}. It may already be in use by another app."
         ))
     })
 }
 
-/// Parse a hotkey string (e.g. "Cmd+Alt+D"). Falls back to the default if unparseable.
-fn parse_shortcut(spec: &str) -> Shortcut {
-    Shortcut::from_str(spec)
-        .unwrap_or_else(|_| Shortcut::new(Some(Modifiers::SUPER | Modifiers::ALT), Code::KeyD))
+/// Validate a hotkey string without registering it. Used to reject bad input early.
+pub fn validate_hotkey(spec: &str) -> error::Result<()> {
+    parse_shortcut(spec).map(|_| ())
+}
+
+/// Parse a hotkey string (e.g. "Cmd+Alt+D"). Returns a clear error for invalid input.
+fn parse_shortcut(spec: &str) -> error::Result<Shortcut> {
+    Shortcut::from_str(spec.trim()).map_err(|_| {
+        error::SpielError::Config(format!(
+            "'{spec}' isn't a valid hotkey. Use one or more modifiers plus a key — for \
+             example Cmd+Alt+D, Cmd+Shift+Space, or CmdOrCtrl+Shift+K. Letters and named \
+             keys work; punctuation like '?' does not."
+        ))
+    })
 }
