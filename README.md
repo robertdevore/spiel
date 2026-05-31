@@ -1,248 +1,124 @@
 # Spiel
 
-> **Get the thought out. Spiel puts it where your cursor is.**
+> **Speak, and it lands where your cursor is.**
 
-Spiel is a lightweight desktop utility that helps you get thoughts out of your head and into text wherever your cursor is.
+Spiel is a local-first push-to-talk dictation utility for macOS. Press a global hotkey,
+talk, press it again — Spiel transcribes your speech **on-device** with Whisper and pastes
+the text into whatever app you're using. No accounts, no telemetry, and (after a one-time
+model download) no network.
 
-The core product loop: **hotkey → talk → transcript → cleaned text → inserted at cursor**
-
----
-
-## Current Phase
-
-**Phase 11 — Packaging, platform hardening, and release readiness**
-
-Phase 11 prepares Spiel for reliable local builds and future distribution. Build documentation, platform notes, security audit, and QA checklist.
-
-## What Currently Works
-
-- ✅ Tauri v2 project compiles and builds cleanly (Rust + TypeScript + Vite)
-- ✅ React + TypeScript frontend renders in browser dev mode
-- ✅ **Global hotkey: Cmd+Option+.** toggles real microphone recording
-- ✅ **Real microphone recording** via CPAL — saves WAV files to temp directory
-- ✅ **Clipboard copy and insert** — editable text, copy/paste with clipboard save/restore
-- ✅ Hotkey registration status and trigger counter displayed in UI
-- ✅ Recording elapsed timer and last recording metadata (file, duration, size, quality, device)
-- ✅ **Text mode definitions**: 5 modes — Raw Dictation, Clean Notes, AI Prompt, Developer Review, Thought Piece
-- ✅ **Cleanup pipeline**: Basic (deterministic, local) and Mock AI (testing) providers
-- ✅ **Final text separation**: Raw transcript vs final text displayed separately
-- ✅ **Copy/insert final text**: Manual copy and insert via existing Phase 4 clipboard tools
-- ✅ **Local history**: SQLite-based persistence — save, view, delete, and clear past sessions
-- ✅ **History privacy**: Local only, no sync, no accounts, clipboard never stored
-- ✅ **Persisted settings**: All settings survive app restarts (SQLite, local only)
-- ✅ **Privacy controls**: Local-only mode, history toggle, clipboard restore toggle
-- ✅ **End-to-end workflow**: Guided flow from record → transcribe → cleanup → insert → save
-- ✅ **Workflow safety**: Auto-insert off, never presses Enter, manual review default
-- ✅ Rust backend with 44 commands
-- ✅ Capability status display (8 implemented: ui_foundation, global_hotkey, audio_recording, transcription, clipboard_paste, local_history, text_modes, settings_persistence)
-- ✅ Dark-themed, minimal, desktop-native UI
-- ✅ No network calls — all processing is local
-
-## What Does Not Work Yet
-
-- ❌ Cloud sync (history is local only)
-- ❌ Settings encryption (stored as plain SQLite settings row)
-- ❌ History encryption (stored as plain SQLite)
-- ❌ AI-powered cleanup (OpenAI, local LLM) — planned for future phases
-- ❌ Hold-to-talk mode (release detection unreliable via current plugin)
-- ❌ Automatic paste after cleanup (auto-insert defaults to off)
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Desktop Framework | Tauri v2 |
-| Backend | Rust |
-| Frontend | React 18 + TypeScript |
-| Build Tool | Vite 6 |
-| Styling | Plain CSS (dark theme) |
-| Hotkeys | Tauri global shortcut plugin (Cmd+Option+.) |
-| Audio | CPAL + hound (WAV output to temp dir) |
-| Clipboard | Tauri clipboard manager (text read/write, manual paste) |
-| Transcription | Mock engine + Local Whisper (whisper.cpp) + trait-based abstraction |
-| History | SQLite (rusqlite, bundled) — local-only, no sync, no encryption |
-| Future: Storage | SQLite (via rusqlite) |
-
-## Development Setup
-
-### Prerequisites
-
-- **Rust** (1.86+) — [rustup.rs](https://rustup.rs)
-- **Node.js** (18+) — [nodejs.org](https://nodejs.org)
-- **macOS**: Xcode Command Line Tools (`xcode-select --install`)
-- **Windows**: Microsoft Visual Studio C++ Build Tools
-- **Linux**: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, and other Tauri dependencies
-
-### Install Dependencies
-
-```bash
-cd spiel
-npm install
-```
-
-### Run in Development Mode
-
-```bash
-npm run tauri dev
-```
-
-This starts the Vite dev server and launches the Tauri window.
-
-### Build for Production
-
-```bash
-npm run tauri build
-```
-
-### Frontend-Only Development (Browser)
-
-You can develop the UI in a browser without Tauri:
-
-```bash
-npm run dev
-```
-
-Open http://localhost:1420 — note that Tauri commands will not work in the browser. The UI will display a notice that the backend is unavailable.
-
-### TypeScript Check
-
-```bash
-npx tsc --noEmit
-```
-
-### Rust Check
-
-```bash
-cd src-tauri && cargo check
-```
-
-## Project Structure
-
-```
-spiel/
-├── src/                          # React frontend
-│   ├── main.tsx                  # Entry point
-│   ├── App.tsx                   # Root component
-│   ├── vite-env.d.ts             # Vite type declarations
-│   ├── components/
-│   │   ├── AppHeader.tsx         # App name + tagline
-│   │   ├── CapturePanel.tsx      # Status, record button, flow simulator
-│   │   ├── ModeSelector.tsx      # Text mode selection (planned)
-│   │   ├── TranscriptPreview.tsx # Raw + cleaned transcript display
-│   │   ├── HistoryPanel.tsx      # Past transcripts (placeholder)
-│   │   ├── SettingsPanel.tsx     # Settings display (planned)
-│   │   └── PrivacyNotice.tsx     # Privacy posture notice
-│   ├── lib/
-│   │   ├── types.ts              # TypeScript type definitions
-│   │   └── api.ts                # Tauri invoke wrappers
-│   └── styles/
-│       └── app.css               # Application styles
-├── src-tauri/                    # Rust backend
-│   ├── Cargo.toml                # Rust dependencies
-│   ├── build.rs                  # Tauri build script
-│   ├── tauri.conf.json           # Tauri configuration
-│   ├── capabilities/
-│   │   └── default.json          # Tauri permissions
-│   ├── icons/                    # App icons
-│   └── src/
-│       ├── main.rs               # Rust entry point
-│       ├── lib.rs                # Tauri builder setup
-│       ├── commands.rs           # Tauri command handlers
-│       └── app_state.rs          # Application state
-├── docs/
-│   ├── architecture.md           # Architecture overview
-│   └── phases.md                 # Phased build plan
-├── index.html                    # HTML entry point
-├── package.json                  # Node dependencies
-├── tsconfig.json                 # TypeScript config
-├── tsconfig.node.json            # TypeScript config for Vite
-├── vite.config.ts                # Vite configuration
-├── AGENT_PLAN.md                 # Agent execution plan
-├── IMPLEMENTATION_LOG.md         # Implementation log
-├── STATUS.md                     # Project status
-└── README.md                     # This file
-```
-
-## Privacy Model
-
-Spiel is designed to be **local-first and privacy-respecting**:
-
-- **Phase 1**: No data collection of any kind. No audio, no keystrokes, no clipboard access, no network requests.
-- **Future phases**: All recording, transcription, and text processing will happen locally by default. Cloud services (if added) will require explicit user opt-in.
-- **No telemetry**: Spiel will never include hidden analytics or tracking.
-- **Transparent permissions**: Every system permission (microphone, clipboard, accessibility) will be clearly explained when requested.
-
-## Roadmap
-
-| Phase | Feature | Status |
-|-------|---------|--------|
-| 1 | Desktop Foundation | ✅ Complete |
-| 2 | Global Hotkey | ✅ Complete |
-| 3 | Audio Recording | ✅ Complete |
-| 4 | Clipboard Insertion | ✅ Complete |
-| 5 | Transcription Abstraction | ✅ Current |
-| 3 | Audio Recording | Planned |
-| 4 | Clipboard Paste Insertion | Planned |
-| 5 | Transcription Abstraction | Planned |
-| 6 | Local Transcription (whisper.cpp) | Planned |
-| 7 | Text Modes & Cleanup | Planned |
-| 8 | Local History (SQLite) | Planned |
-| 9 | Settings & Privacy Controls | Planned |
-| 10 | Polish, Packaging & Platform Hardening | Planned |
-
-## Manual Testing Checklist (Phase 1)
-
-- [ ] App launches without errors (`npm run tauri dev`)
-- [ ] Hotkey registration status shows green dot (registered)
-- [ ] Pressing Cmd+Option+. toggles state between Idle and Recording
-- [ ] Trigger count increments on each press
-- [ ] Hotkey works when another app is focused
-- [ ] UI renders all sections (header, capture, modes, transcript, history, settings, privacy)
-- [ ] Backend status dot shows green (when running in Tauri)
-- [ ] Flow state simulator changes states correctly
-- [ ] Mode selector shows all 5 modes (all planned)
-- [ ] Transcript preview shows demo content
-- [ ] History shows placeholder entries
-- [ ] Settings shows all groups with planned badges
-- [ ] Privacy notice is visible
-- [ ] Capability grid shows implemented vs planned
-- [ ] Window is resizable
-- [ ] Dark theme is applied
+This is the **v2 rebuild**. It was written from scratch after a senior review of the
+original DeepSeek build found that its core loop was faked (see
+[`docs/REVIEW-2026-05-30-opus48.md`](docs/REVIEW-2026-05-30-opus48.md)). The original is
+preserved on the `main` branch; this branch (`rebuild/spiel-v2`) shares no code with it.
 
 ---
 
-## Build & Run
+## How it works
 
-### Prerequisites
-- Rust 1.86+ (`rustup update stable`)
-- Node.js 18+ and npm 9+
-- macOS 12+ (primary), Windows/Linux (configured, not fully tested)
+```
+hotkey ─▶ record (mic) ─▶ transcribe (whisper.cpp, on-device) ─▶ paste at cursor (Cmd+V)
+```
 
-### Quick Start
+- **Menu-bar app.** No Dock icon. Lives in the status bar; a small settings window opens
+  from the tray.
+- **One code path.** The hotkey, the tray "Start / Stop", and the UI button all call the
+  same `dictation::toggle` — behavior can't drift between them.
+- **In-memory audio.** Microphone samples are downmixed to mono, resampled to 16 kHz, and
+  fed straight to Whisper. **No audio file is ever written to disk.**
+- **Real insertion.** Text is placed on the clipboard and pasted with a synthesized Cmd+V.
+  The previous clipboard is restored afterward. If Accessibility permission is missing, the
+  text stays on the clipboard and Spiel tells you how to grant it — your words are never
+  lost.
+
+## What's real (and what isn't faked)
+
+| Capability | Status |
+| ---------- | ------ |
+| Microphone capture | Real — CPAL, all sample formats, bounded by a max-seconds cap |
+| Transcription | Real — embedded `whisper.cpp` via `whisper-rs`, fully offline |
+| Model delivery | First-run download (checksum/structure-validated), then offline |
+| Text insertion at cursor | Real — clipboard + synthesized Cmd+V, with clipboard restore |
+| macOS permissions | Microphone usage string + Accessibility flow are wired |
+| Networking | **Only** the one-time model download. Nothing else leaves the device |
+| Telemetry / accounts | None |
+
+There is no mock engine in the product path. If a model isn't installed, Spiel refuses to
+"record into the void" and points you to the download instead of returning fake text.
+
+## Privacy
+
+Spiel records only while you're dictating. Audio is transcribed locally and never written
+to disk. The only files Spiel creates are the Whisper model (in the app data directory) and
+`config.json` (in the app config directory). No audio or transcript ever leaves your Mac.
+The single network request in the entire app is the model download you trigger yourself.
+
+## Requirements
+
+- macOS 12+
+- Rust 1.80+ and Node.js 18+
+- **CMake** (`brew install cmake`) — `whisper-rs` compiles `whisper.cpp` from source
+- Xcode Command Line Tools
+
+## Build & run
+
 ```bash
 npm install
-npm run tauri dev
+npm run tauri dev      # run the app
+npm run tauri build    # produce a .app / .dmg
 ```
 
-### Build Commands
+### Verification
+
 ```bash
-npm run build          # Frontend production build
-cd src-tauri && cargo build   # Rust debug build
-npm run tauri build    # Full Tauri production build (outputs .app/.dmg/.msi)
+npm run build                                              # tsc (strict) + vite
+cd src-tauri
+cargo fmt --check
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### Checks
-```bash
-npx tsc --noEmit           # TypeScript type check
-cd src-tauri && cargo check     # Rust type check
-cd src-tauri && cargo fmt --check  # Rust formatting
-```
+All of the above are green.
 
-### Platform Notes
-See [docs/platforms.md](docs/platforms.md) for macOS/Windows/Linux details.
-See [docs/release.md](docs/release.md) for release status and QA checklist.
-See [docs/security.md](docs/security.md) for security and privacy audit.
+### First run
+
+1. Launch Spiel — it appears in the menu bar.
+2. Open **Settings…** from the tray and **download a model** (Base · English recommended).
+3. macOS will ask for **Microphone** access the first time you record. Grant it.
+4. For auto-paste, grant **Accessibility** when prompted (Settings → Privacy & Security →
+   Accessibility). Until then, transcripts go to the clipboard for a manual Cmd+V.
+5. Press **Cmd+Alt+D** anywhere to start/stop dictation.
+
+## Settings
+
+`hotkey`, `model`, `language` (en/auto), `auto_paste`, `restore_clipboard`,
+`max_seconds`. Stored as readable JSON in the app config directory.
+
+## Architecture
+
+| File | Responsibility |
+| ---- | -------------- |
+| `src-tauri/src/lib.rs` | Tauri builder, menu-bar tray, hotkey registration, window-hide |
+| `src-tauri/src/dictation.rs` | The single record→transcribe→insert orchestrator |
+| `src-tauri/src/audio.rs` | CPAL capture, downmix, resample to 16 kHz (in memory) |
+| `src-tauri/src/whisper.rs` | Embedded whisper.cpp transcription + output cleanup |
+| `src-tauri/src/model.rs` | Model registry + validated first-run downloader |
+| `src-tauri/src/insert.rs` | Clipboard write + Cmd+V synthesis + clipboard restore |
+| `src-tauri/src/accessibility.rs` | macOS Accessibility (TCC) checks and prompts |
+| `src-tauri/src/config.rs` / `state.rs` | Settings persistence and shared state |
+| `src-tauri/src/commands.rs` | The complete (narrow, typed) command surface |
+| `src/main.ts` | Settings/status window |
+
+## Troubleshooting
+
+- **`fatal error: 'atomic' file not found` while building** — your Command Line Tools are
+  missing toolchain C++ headers. Reinstall them (`sudo rm -rf
+  /Library/Developer/CommandLineTools && xcode-select --install`), or build with
+  `CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"`.
+- **Hotkey does nothing** — another app may own Cmd+Alt+D; change it in Settings.
+- **Text isn't pasting** — grant Accessibility permission; until then text is on the
+  clipboard.
 
 ---
 
-**Built with Tauri v2, React, TypeScript, and Rust.**
+Built with Tauri v2, Rust, whisper.cpp, and TypeScript.

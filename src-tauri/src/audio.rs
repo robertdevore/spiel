@@ -1,249 +1,269 @@
-//! Audio recording module for Spiel.
-//! Uses CPAL for cross-platform microphone capture and hound for WAV output.
+//! Microphone capture.
 //!
-//! Architecture:
-//! - `start_recording()` spawns a background thread that collects samples
-//!   into a shared buffer. The CPAL stream stays on that thread.
-//! - `stop_recording()` signals the thread to stop, collects the buffer,
-//!   and writes a WAV file.
-//! - Communication via channels because CPAL streams are not `Send`.
+//! Captures from the default input device, downmixes to mono, and resamples to the
+//! 16 kHz f32 PCM that Whisper expects — all in memory. **No WAV files are ever
+//! written to disk**, which removes the "raw audio lingers in /tmp" privacy problem
+//! the previous build had.
+//!
+//! The CPAL stream is not `Send`, so it lives entirely on a dedicated capture thread.
+//! We talk to that thread over channels: a stop signal in, the finished samples out.
 
+use crate::error::{Result, SpielError};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::SampleFormat;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// Errors that can occur during audio recording.
-#[derive(Debug, Clone)]
-pub enum RecordingError {
-    NoInputDevice,
-    ConfigError(String),
-    StreamError(String),
-    AlreadyRecording,
-    NotRecording,
-    FileError(String),
-    DeviceError(String),
+/// Sample rate Whisper models are trained on.
+pub const TARGET_SAMPLE_RATE: u32 = 16_000;
+
+/// A finished capture: mono 16 kHz f32 samples, ready for Whisper.
+pub struct Capture {
+    pub samples: Vec<f32>,
 }
 
-impl std::fmt::Display for RecordingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoInputDevice => write!(f, "No microphone or input device found. Please connect a microphone and try again."),
-            Self::ConfigError(e) => write!(f, "Audio configuration error: {}", e),
-            Self::StreamError(e) => write!(f, "Audio stream error: {}", e),
-            Self::AlreadyRecording => write!(f, "Recording is already in progress. Stop the current recording before starting a new one."),
-            Self::NotRecording => write!(f, "No recording is in progress."),
-            Self::FileError(e) => write!(f, "File error: {}", e),
-            Self::DeviceError(e) => write!(f, "Microphone error: {}", e),
+impl Capture {
+    pub fn is_effectively_silent(&self) -> bool {
+        // Very short or near-zero-energy clips aren't worth sending to Whisper.
+        if self.samples.len() < TARGET_SAMPLE_RATE as usize / 5 {
+            return true; // < 0.2s
         }
+        let energy: f32 =
+            self.samples.iter().map(|s| s * s).sum::<f32>() / self.samples.len() as f32;
+        energy.sqrt() < 0.0008
     }
 }
 
-/// Metadata about a completed recording.
-#[derive(Debug, Clone)]
-pub struct RecordingMeta {
-    pub file_path: String,
-    pub filename: String,
-    pub duration_ms: u64,
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub size_bytes: u64,
-    pub created_at: String,
-    pub device_name: Option<String>,
-}
-
-/// Handle for controlling an active recording session.
-/// Uses channels to communicate with the recording thread.
-pub struct RecordingHandle {
-    /// Send a signal to stop the recording thread
+/// Controls one in-progress recording. Dropping it stops the capture thread.
+pub struct Recorder {
     stop_tx: mpsc::Sender<()>,
-    /// Receive the collected samples when the thread finishes
-    samples_rx: mpsc::Receiver<Vec<i16>>,
-    /// When recording started
-    started_at: Instant,
-    /// Audio configuration
-    config: cpal::StreamConfig,
-    /// Device name
-    device_name: Option<String>,
-    /// Shared elapsed time (updated by the recording thread)
-    elapsed: Arc<Mutex<u64>>,
+    result_rx: mpsc::Receiver<Vec<f32>>,
+    in_rate: u32,
+    in_channels: u16,
+    /// Captured live so the UI can show an elapsed timer.
+    elapsed_ms: Arc<Mutex<u64>>,
 }
 
-/// If the handle is dropped without calling stop(),
-/// signal the recording thread to stop to prevent resource leaks.
-impl Drop for RecordingHandle {
+impl Drop for Recorder {
     fn drop(&mut self) {
         let _ = self.stop_tx.send(());
     }
 }
 
-impl RecordingHandle {
-    /// Returns the elapsed duration since recording started.
+impl Recorder {
     pub fn elapsed_ms(&self) -> u64 {
-        *self.elapsed.lock().unwrap()
+        *self.elapsed_ms.lock().unwrap()
     }
 
-    /// Stops recording and writes the WAV file.
-    /// Consumes the handle.
-    pub fn stop(self) -> Result<RecordingMeta, RecordingError> {
-        // Signal the recording thread to stop
+    /// Stop recording and return resampled mono 16 kHz samples. Consumes the recorder.
+    pub fn finish(self) -> Result<Capture> {
         let _ = self.stop_tx.send(());
-
-        // Wait for the samples (with timeout)
-        let samples = self
-            .samples_rx
+        let raw = self
+            .result_rx
             .recv_timeout(std::time::Duration::from_secs(10))
-            .map_err(|_| {
-                RecordingError::StreamError(
-                    "Timed out waiting for recording thread to finish".into(),
-                )
-            })?;
+            .map_err(|_| SpielError::Audio("recording thread did not return in time".into()))?;
 
-        let elapsed = self.started_at.elapsed();
-        let duration_ms = elapsed.as_millis() as u64;
+        let mono = downmix_to_mono(&raw, self.in_channels);
+        let samples = resample_linear(&mono, self.in_rate, TARGET_SAMPLE_RATE);
 
-        // Write WAV file
-        let file_path = create_temp_wav_path();
-        let filename = std::path::Path::new(&file_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("recording.wav")
-            .to_string();
-
-        let spec = hound::WavSpec {
-            channels: self.config.channels,
-            sample_rate: self.config.sample_rate.0,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let mut writer = hound::WavWriter::create(&file_path, spec)
-            .map_err(|e| RecordingError::FileError(e.to_string()))?;
-
-        for sample in &samples {
-            writer
-                .write_sample(*sample)
-                .map_err(|e| RecordingError::FileError(e.to_string()))?;
-        }
-
-        writer
-            .finalize()
-            .map_err(|e| RecordingError::FileError(e.to_string()))?;
-
-        let size_bytes = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
-
-        let created_at = crate::chrono_now_iso();
-
-        Ok(RecordingMeta {
-            file_path,
-            filename,
-            duration_ms,
-            sample_rate: self.config.sample_rate.0,
-            channels: self.config.channels,
-            size_bytes,
-            created_at,
-            device_name: self.device_name.clone(),
-        })
+        Ok(Capture { samples })
     }
 }
 
-/// Start recording from the default input device.
-/// Spawns a background thread for audio capture.
-pub fn start_recording() -> Result<RecordingHandle, RecordingError> {
+/// Begin capturing from the default input device.
+pub fn start(max_seconds: u32) -> Result<Recorder> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
-        .ok_or(RecordingError::NoInputDevice)?;
+        .ok_or(SpielError::NoInputDevice)?;
 
-    let device_name = device.name().ok();
-
-    let config = device
+    let supported = device
         .default_input_config()
-        .map_err(|e| RecordingError::ConfigError(e.to_string()))?;
-
-    let stream_config: cpal::StreamConfig = config.into();
+        .map_err(|e| SpielError::Audio(e.to_string()))?;
+    let in_rate = supported.sample_rate().0;
+    let in_channels = supported.channels();
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let (samples_tx, samples_rx) = mpsc::channel::<Vec<i16>>();
+    let (result_tx, result_rx) = mpsc::channel::<Vec<f32>>();
+    let started = Instant::now();
+    let elapsed_ms = Arc::new(Mutex::new(0u64));
+    let elapsed_clone = Arc::clone(&elapsed_ms);
 
-    let started_at = Instant::now();
-    let elapsed = Arc::new(Mutex::new(0u64));
-    let elapsed_clone = Arc::clone(&elapsed);
+    // Cap interleaved samples so a forgotten recording can't grow without bound.
+    let max_samples = (in_rate as usize) * (in_channels as usize) * (max_seconds as usize);
 
-    // Spawn recording thread — this thread owns the CPAL stream
-    let config_clone = stream_config.clone();
     std::thread::spawn(move || {
-        let samples: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
-        let samples_clone = Arc::clone(&samples);
+        let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let cb_buffer = Arc::clone(&buffer);
 
-        let stream = match device.build_input_stream(
-            &config_clone,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut buf = samples_clone.lock().unwrap();
-                for &sample in data {
-                    let clamped = sample.clamp(-1.0, 1.0);
-                    buf.push((clamped * 32767.0) as i16);
-                }
-            },
-            |err| {
-                eprintln!("Audio capture error: {}", err);
-            },
-            None,
+        let err_fn = |e| eprintln!("[spiel] audio stream error: {e}");
+
+        // CPAL hands us whatever native format the device uses; normalize each to f32.
+        let stream = match build_stream(
+            &device,
+            &config,
+            sample_format,
+            cb_buffer,
+            max_samples,
+            err_fn,
         ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to build input stream: {}", e);
-                let _ = samples_tx.send(Vec::new());
+                eprintln!("[spiel] failed to build input stream: {e}");
+                let _ = result_tx.send(Vec::new());
                 return;
             }
         };
 
         if let Err(e) = stream.play() {
-            eprintln!("Failed to start stream: {}", e);
-            let _ = samples_tx.send(Vec::new());
+            eprintln!("[spiel] failed to start stream: {e}");
+            let _ = result_tx.send(Vec::new());
             return;
         }
 
-        // Update elapsed time periodically
-        let start = Instant::now();
         loop {
             {
                 let mut e = elapsed_clone.lock().unwrap();
-                *e = start.elapsed().as_millis() as u64;
+                *e = started.elapsed().as_millis() as u64;
             }
-
-            // Check for stop signal (non-blocking)
-            if stop_rx.try_recv().is_ok() {
+            if stop_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_ok()
+            {
                 break;
             }
-
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Hard cap reached: stop on our own.
+            if buffer.lock().unwrap().len() >= max_samples {
+                break;
+            }
         }
 
-        // Collect and send samples
-        let collected = {
-            let mut buf = samples.lock().unwrap();
-            std::mem::take(&mut *buf)
-        };
-        let _ = samples_tx.send(collected);
+        let collected = std::mem::take(&mut *buffer.lock().unwrap());
+        let _ = result_tx.send(collected);
     });
 
-    Ok(RecordingHandle {
+    Ok(Recorder {
         stop_tx,
-        samples_rx,
-        started_at,
-        config: stream_config,
-        device_name,
-        elapsed,
+        result_rx,
+        in_rate,
+        in_channels,
+        elapsed_ms,
     })
 }
 
-/// Create a path for a temporary WAV file in the system temp directory.
-fn create_temp_wav_path() -> String {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let tmp = std::env::temp_dir();
-    format!("{}/spiel_recording_{}.wav", tmp.display(), ts)
+fn build_stream(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    format: SampleFormat,
+    buffer: Arc<Mutex<Vec<f32>>>,
+    max_samples: usize,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
+    macro_rules! input {
+        ($t:ty, $to_f32:expr) => {{
+            let buffer = Arc::clone(&buffer);
+            device.build_input_stream(
+                config,
+                move |data: &[$t], _: &cpal::InputCallbackInfo| {
+                    let mut buf = buffer.lock().unwrap();
+                    if buf.len() >= max_samples {
+                        return;
+                    }
+                    buf.extend(data.iter().map(|&s| ($to_f32)(s)));
+                },
+                err_fn,
+                None,
+            )
+        }};
+    }
+
+    match format {
+        SampleFormat::F32 => input!(f32, |s: f32| s),
+        SampleFormat::I16 => input!(i16, |s: i16| s as f32 / i16::MAX as f32),
+        SampleFormat::U16 => input!(u16, |s: u16| (s as f32 / u16::MAX as f32) * 2.0 - 1.0),
+        other => {
+            eprintln!("[spiel] unsupported sample format {other:?}, defaulting to f32");
+            input!(f32, |s: f32| s)
+        }
+    }
+}
+
+/// Average interleaved channels down to mono.
+fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
+    if channels <= 1 {
+        return interleaved.to_vec();
+    }
+    let ch = channels as usize;
+    interleaved
+        .chunks(ch)
+        .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+        .collect()
+}
+
+/// Resample mono audio to `out_rate`. Downsampling averages each source window, which
+/// doubles as a crude anti-alias low-pass — adequate for speech going into Whisper.
+fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+    if in_rate == out_rate || input.is_empty() {
+        return input.to_vec();
+    }
+    let ratio = in_rate as f64 / out_rate as f64;
+    let out_len = (input.len() as f64 / ratio).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let start = (i as f64 * ratio) as usize;
+        let end = (((i + 1) as f64 * ratio) as usize)
+            .min(input.len())
+            .max(start + 1);
+        let window = &input[start..end];
+        out.push(window.iter().sum::<f32>() / window.len() as f32);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downmix_averages_stereo() {
+        let stereo = [1.0, 0.0, 0.5, 0.5];
+        assert_eq!(downmix_to_mono(&stereo, 2), vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn downmix_passthrough_mono() {
+        let mono = [0.1, 0.2, 0.3];
+        assert_eq!(downmix_to_mono(&mono, 1), vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn resample_48k_to_16k_thirds_length() {
+        let input: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.01).sin()).collect();
+        let out = resample_linear(&input, 48_000, 16_000);
+        assert_eq!(out.len(), 1600);
+    }
+
+    #[test]
+    fn resample_noop_when_rates_match() {
+        let input = vec![0.1, 0.2, 0.3];
+        assert_eq!(resample_linear(&input, 16_000, 16_000), input);
+    }
+
+    #[test]
+    fn silence_detection_flags_short_clip() {
+        let c = Capture {
+            samples: vec![0.0; 100],
+        };
+        assert!(c.is_effectively_silent());
+    }
+
+    #[test]
+    fn silence_detection_passes_loud_clip() {
+        let samples: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
+        let c = Capture { samples };
+        assert!(!c.is_effectively_silent());
+    }
 }

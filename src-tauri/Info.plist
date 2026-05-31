@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Merged into the generated Info.plist by the Tauri macOS bundler.
+  NSMicrophoneUsageDescription is REQUIRED: without it, macOS terminates the app the
+  moment it touches the microphone. LSUIElement marks Spiel as a menu-bar accessory
+  (no Dock icon), matching the Accessory activation policy set in lib.rs.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Spiel records your microphone only while you hold the dictation hotkey, transcribes it on-device, and never uploads audio.</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

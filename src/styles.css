@@ -1,0 +1,102 @@
+:root {
+  --bg: #15161a;
+  --panel: #1d1f25;
+  --panel-2: #24272f;
+  --text: #e7e9ee;
+  --muted: #9aa0ad;
+  --accent: #6ea8fe;
+  --accent-strong: #4d8bff;
+  --danger: #ff6b6b;
+  --good: #5bd6a0;
+  --border: #2c2f38;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#app { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+header { display: flex; align-items: baseline; justify-content: space-between; }
+header h1 { font-size: 18px; margin: 0; letter-spacing: 0.2px; }
+header .tag { color: var(--muted); font-size: 12px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.status-row { display: flex; align-items: center; gap: 10px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.idle { background: var(--muted); }
+.dot.recording { background: var(--danger); box-shadow: 0 0 0 4px rgba(255,107,107,0.2); }
+.dot.transcribing, .dot.inserting { background: var(--accent); box-shadow: 0 0 0 4px rgba(110,168,254,0.2); }
+.dot.error { background: #ffb454; }
+.status-text { font-weight: 600; }
+.status-msg { color: var(--muted); font-size: 12px; min-height: 14px; }
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+button:hover { background: #2b2f38; }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #06122b; font-weight: 700; }
+button.primary:hover { background: var(--accent); }
+button.recording { background: var(--danger); border-color: var(--danger); color: #2b0808; font-weight: 700; }
+
+.big-btn { font-size: 15px; padding: 12px; }
+
+label.field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+label.field input[type="text"], label.field input[type="number"], label.field select {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; }
+
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--text); }
+.toggle input { width: 16px; height: 16px; accent-color: var(--accent-strong); }
+
+.section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 0; }
+
+.model { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); }
+.model.current { border-color: var(--accent-strong); }
+.model .meta { display: flex; flex-direction: column; gap: 2px; }
+.model .name { font-weight: 600; font-size: 13px; }
+.model .note { color: var(--muted); font-size: 11px; }
+.model .badge { font-size: 11px; color: var(--good); }
+.model button { padding: 6px 10px; font-size: 12px; }
+
+.progress { height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--accent-strong); width: 0%; transition: width 0.15s; }
+
+.transcript { font-size: 13px; line-height: 1.5; white-space: pre-wrap; user-select: text; color: var(--text); max-height: 120px; overflow-y: auto; }
+.transcript.empty { color: var(--muted); font-style: italic; }
+
+.warn { color: #ffb454; font-size: 12px; }
+.privacy { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-size: 12px; }

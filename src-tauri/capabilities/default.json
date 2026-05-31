@@ -1,11 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for Spiel — Phase 12 (optional OpenAI provider support)",
+  "description": "Spiel runs entirely locally. The webview only talks to Spiel's own commands; it has no network, filesystem, or shell capability.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "global-shortcut:default",
-    "clipboard-manager:default"
+    "global-shortcut:default"
   ]
 }
