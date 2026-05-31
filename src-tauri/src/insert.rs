@@ -8,10 +8,6 @@
 
 use crate::accessibility;
 use crate::error::{Result, SpielError};
-use enigo::{
-    Direction::{Click, Press, Release},
-    Enigo, Key, Keyboard, Settings,
-};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -72,17 +68,38 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
     Ok(outcome)
 }
 
-/// Synthesize a Cmd+V keystroke. macOS maps `Key::Meta` to the Command key.
+/// Synthesize Cmd+V by posting the V keycode with the Command modifier flag set.
+///
+/// We deliberately do NOT use a Unicode-character event: on macOS that injects the
+/// literal character 'v' and ignores held modifiers, which is why a naive approach types
+/// "v" instead of pasting. Posting keycode 9 (kVK_ANSI_V) with the Command flag is a real
+/// Cmd+V the focused app interprets as paste.
+#[cfg(target_os = "macos")]
 fn paste_via_cmd_v() -> Result<()> {
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| SpielError::Insertion(format!("input synthesis unavailable: {e}")))?;
-    enigo
-        .key(Key::Meta, Press)
-        .map_err(|e| SpielError::Insertion(e.to_string()))?;
-    let press_result = enigo.key(Key::Unicode('v'), Click);
-    // Always release Meta, even if the 'v' press failed, so we don't leave Cmd "stuck".
-    let release_result = enigo.key(Key::Meta, Release);
-    press_result.map_err(|e| SpielError::Insertion(e.to_string()))?;
-    release_result.map_err(|e| SpielError::Insertion(e.to_string()))?;
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    const KEY_V: u16 = 9; // kVK_ANSI_V
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| SpielError::Insertion("could not create input event source".into()))?;
+
+    let key_down = CGEvent::new_keyboard_event(source.clone(), KEY_V, true)
+        .map_err(|_| SpielError::Insertion("could not create key-down event".into()))?;
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_down.post(CGEventTapLocation::HID);
+
+    let key_up = CGEvent::new_keyboard_event(source, KEY_V, false)
+        .map_err(|_| SpielError::Insertion("could not create key-up event".into()))?;
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_up.post(CGEventTapLocation::HID);
+
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn paste_via_cmd_v() -> Result<()> {
+    Err(SpielError::Insertion(
+        "auto-paste is only implemented on macOS".into(),
+    ))
 }

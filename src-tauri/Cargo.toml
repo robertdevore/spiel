@@ -27,9 +27,8 @@ cpal = "0.15"
 # Local transcription (embedded whisper.cpp via cmake — no network, no CLI)
 whisper-rs = "0.12"
 
-# Text insertion
+# Clipboard
 arboard = "3"
-enigo = "0.2"
 
 # Model download (first run only) + integrity
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
@@ -38,6 +37,8 @@ sha2 = "0.10"
 [target.'cfg(target_os = "macos")'.dependencies]
 # AXIsProcessTrusted() wrapper for the Accessibility permission used by auto-paste.
 macos-accessibility-client = "0.0.1"
+# Synthesize a real Cmd+V keystroke (keycode + modifier flag), not a Unicode char.
+core-graphics = "0.24"
 
 [profile.release]
 strip = true
