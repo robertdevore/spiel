@@ -52,13 +52,19 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
         return Ok(outcome);
     }
 
+    // Let the pasteboard write settle before we trigger the paste, so the focused app
+    // can't read a stale changeCount.
+    std::thread::sleep(std::time::Duration::from_millis(120));
     paste_via_cmd_v()?;
     outcome.pasted = true;
 
     if restore_clipboard {
         if let Some(prev) = previous {
-            // Give the focused app a beat to read the pasteboard before we overwrite it.
-            std::thread::sleep(std::time::Duration::from_millis(180));
+            // Critical: wait for the focused app to actually consume the paste before we
+            // put the old clipboard back. Too short a wait and the app reads the restored
+            // (previous) contents instead of the transcript — which looks like Spiel
+            // "pasting your clipboard".
+            std::thread::sleep(std::time::Duration::from_millis(500));
             if clipboard.set_text(prev).is_ok() {
                 outcome.restored_previous = true;
             }
