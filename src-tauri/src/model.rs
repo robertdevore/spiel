@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
 
-/// GGML container magic ("ggml" little-endian) at the start of every whisper model.
-const GGML_MAGIC: [u8; 4] = [0x67, 0x67, 0x6d, 0x6c];
+/// GGML container magic. whisper.cpp writes the u32 `0x67676d6c` ("ggml"), which lands on
+/// disk little-endian as the bytes `6c 6d 67 67`. We compare as a LE u32 to stay correct.
+const GGML_MAGIC: u32 = 0x6767_6d6c;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelSpec {
@@ -164,7 +165,7 @@ fn validate_file(path: &Path, spec: &ModelSpec) -> Result<()> {
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)
         .map_err(|_| SpielError::Model("model file is truncated".into()))?;
-    if magic != GGML_MAGIC {
+    if u32::from_le_bytes(magic) != GGML_MAGIC {
         return Err(SpielError::Model(
             "file is not a valid GGML whisper model".into(),
         ));
@@ -207,6 +208,13 @@ mod tests {
     fn missing_file_not_installed() {
         let dir = std::env::temp_dir().join("spiel_model_test_missing");
         assert!(!is_installed(&dir, "base.en"));
+    }
+
+    #[test]
+    fn ggml_magic_matches_real_on_disk_bytes() {
+        // Verified against the real ggml-base.en.bin: it begins with `6c 6d 67 67`.
+        let on_disk = [0x6c_u8, 0x6d, 0x67, 0x67];
+        assert_eq!(u32::from_le_bytes(on_disk), GGML_MAGIC);
     }
 
     #[test]

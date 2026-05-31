@@ -48,6 +48,7 @@ let status: StatusSnapshot | null = null;
 let config: Config | null = null;
 let models: ModelView[] = [];
 let lastTranscript = "";
+let lastError = "";
 const downloads: Record<string, { downloaded: number; total: number | null }> = {};
 
 const app = document.getElementById("app")!;
@@ -85,7 +86,7 @@ async function saveConfig(patch: Partial<Config>) {
   try {
     config = await invoke<Config>("update_config", { config: next });
   } catch (e) {
-    alert(`Could not save settings: ${e}`);
+    setError(`Could not save settings: ${e}`);
   }
   await refreshAll();
 }
@@ -101,6 +102,7 @@ function render() {
 
   app.innerHTML = "";
   app.appendChild(headerEl());
+  if (lastError) app.appendChild(errorBanner(lastError));
   app.appendChild(statusCard(s, c));
   if (s.needs_accessibility || !s.accessibility_trusted) {
     app.appendChild(accessibilityCard(s));
@@ -115,6 +117,28 @@ function headerEl(): HTMLElement {
   const el = document.createElement("header");
   el.innerHTML = `<h1>Spiel</h1><span class="tag">local dictation</span>`;
   return el;
+}
+
+function errorBanner(msg: string): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "card error-banner";
+  const text = document.createElement("div");
+  text.className = "warn";
+  text.textContent = msg;
+  const dismiss = document.createElement("button");
+  dismiss.textContent = "Dismiss";
+  dismiss.onclick = () => {
+    lastError = "";
+    render();
+  };
+  el.appendChild(text);
+  el.appendChild(dismiss);
+  return el;
+}
+
+function setError(msg: string) {
+  lastError = msg;
+  render();
 }
 
 function statusCard(s: StatusSnapshot, c: Config): HTMLElement {
@@ -220,12 +244,12 @@ function modelsCard(): HTMLElement {
       const dlBtn = document.createElement("button");
       dlBtn.textContent = "Download";
       dlBtn.onclick = () => {
+        lastError = "";
         downloads[m.id] = { downloaded: 0, total: null };
         render();
         invoke("download_model", { modelId: m.id }).catch((e) => {
           delete downloads[m.id];
-          alert(`Download failed: ${e}`);
-          render();
+          setError(`Download failed: ${e}`);
         });
       };
       row.appendChild(dlBtn);
@@ -375,7 +399,11 @@ async function init() {
   );
   await listen<{ model_id: string; ok: boolean; error: string | null }>("model-done", (e) => {
     delete downloads[e.payload.model_id];
-    if (!e.payload.ok && e.payload.error) alert(`Model download failed: ${e.payload.error}`);
+    if (!e.payload.ok) {
+      lastError = `Model download failed: ${e.payload.error ?? "unknown error"}`;
+    } else {
+      lastError = "";
+    }
     refreshAll();
   });
 

@@ -98,5 +98,6 @@ label.field input[type="text"], label.field input[type="number"], label.field se
 .transcript.empty { color: var(--muted); font-style: italic; }
 
 .warn { color: #ffb454; font-size: 12px; }
+.error-banner { border-color: #6b3a1a; background: #261c12; }
 .privacy { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-size: 12px; }
