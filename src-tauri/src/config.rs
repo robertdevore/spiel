@@ -22,6 +22,11 @@ pub struct Config {
     pub auto_paste: bool,
     /// Restore whatever was on the clipboard before insertion (best-effort).
     pub restore_clipboard: bool,
+    /// Keep Whisper model loaded in RAM between dictations for lower latency.
+    /// If false, model is unloaded after each dictation to minimize idle memory.
+    pub keep_model_loaded: bool,
+    /// Transcription thread count. Lower values reduce memory/thread pressure.
+    pub transcription_threads: u8,
     /// Hard cap on a single recording. Protects memory and bounds latency.
     pub max_seconds: u32,
 }
@@ -32,10 +37,13 @@ impl Default for Config {
             // Cmd+Alt+D — "D" for dictate. Avoids the Spotlight/IME conflicts the
             // previous build kept hitting with Space-based combos.
             hotkey: "Cmd+Alt+D".to_string(),
-            model: "base.en".to_string(),
+            // Memory-first default: tiny model keeps footprint much lower.
+            model: "tiny.en".to_string(),
             language: "en".to_string(),
             auto_paste: true,
             restore_clipboard: true,
+            keep_model_loaded: false,
+            transcription_threads: 2,
             max_seconds: 120,
         }
     }
@@ -71,6 +79,7 @@ impl Config {
 
         // Keep recordings sane: 5s..=600s.
         self.max_seconds = self.max_seconds.clamp(5, 600);
+        self.transcription_threads = self.transcription_threads.clamp(1, 8);
         Ok(self)
     }
 
@@ -148,5 +157,24 @@ mod tests {
         .validated()
         .unwrap();
         assert_eq!(cfg2.language, "auto");
+    }
+
+    #[test]
+    fn transcription_threads_is_clamped() {
+        let cfg = Config {
+            transcription_threads: 0,
+            ..Config::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(cfg.transcription_threads, 1);
+
+        let cfg2 = Config {
+            transcription_threads: 50,
+            ..Config::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(cfg2.transcription_threads, 8);
     }
 }

@@ -38,14 +38,19 @@ impl Transcriber {
     }
 
     /// Transcribe mono 16 kHz f32 samples. `language` is a code like "en", or "auto".
-    pub fn transcribe(&self, samples: &[f32], language: &str) -> Result<String> {
+    pub fn transcribe(
+        &self,
+        samples: &[f32],
+        language: &str,
+        configured_threads: u8,
+    ) -> Result<String> {
         let mut state = self
             .ctx
             .create_state()
             .map_err(|e| SpielError::Transcription(e.to_string()))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_n_threads(choose_thread_count());
+        params.set_n_threads(choose_thread_count(configured_threads));
         params.set_translate(false);
         if language != "auto" && !language.is_empty() {
             params.set_language(Some(language));
@@ -112,17 +117,18 @@ fn is_non_speech_tag(lower: &str) -> bool {
     TAGS.contains(&lower)
 }
 
-fn choose_thread_count() -> i32 {
+fn choose_thread_count(configured_threads: u8) -> i32 {
     if let Ok(raw) = std::env::var("SPIEL_WHISPER_THREADS") {
         if let Ok(v) = raw.trim().parse::<i32>() {
             return v.clamp(1, 16);
         }
     }
+    let configured = (configured_threads as i32).clamp(1, 8);
     let cores = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(4);
     // Leave one core for UI/system work so dictation remains responsive under load.
-    (cores - 1).clamp(1, 8)
+    configured.min((cores - 1).clamp(1, 8))
 }
 
 #[cfg(test)]
@@ -147,7 +153,7 @@ mod tests {
 
     #[test]
     fn thread_count_is_bounded() {
-        let n = choose_thread_count();
-        assert!((1..=16).contains(&n));
+        let n = choose_thread_count(2);
+        assert!((1..=8).contains(&n));
     }
 }
