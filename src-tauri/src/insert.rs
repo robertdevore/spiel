@@ -57,9 +57,10 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
 
     // Let the pasteboard write settle before we trigger the paste, so the focused app
     // can't read a stale changeCount.
-    std::thread::sleep(std::time::Duration::from_millis(
-        env_delay_ms("SPIEL_PRE_PASTE_DELAY_MS", DEFAULT_PRE_PASTE_DELAY_MS),
-    ));
+    std::thread::sleep(std::time::Duration::from_millis(env_delay_ms(
+        "SPIEL_PRE_PASTE_DELAY_MS",
+        DEFAULT_PRE_PASTE_DELAY_MS,
+    )));
     paste_via_cmd_v()?;
     outcome.pasted = true;
 
@@ -69,9 +70,10 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
             // put the old clipboard back. Too short a wait and the app reads the restored
             // (previous) contents instead of the transcript — which looks like Spiel
             // "pasting your clipboard".
-            std::thread::sleep(std::time::Duration::from_millis(
-                env_delay_ms("SPIEL_RESTORE_DELAY_MS", DEFAULT_RESTORE_DELAY_MS),
-            ));
+            std::thread::sleep(std::time::Duration::from_millis(env_delay_ms(
+                "SPIEL_RESTORE_DELAY_MS",
+                DEFAULT_RESTORE_DELAY_MS,
+            )));
             if clipboard.set_text(prev).is_ok() {
                 outcome.restored_previous = true;
             }

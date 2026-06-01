@@ -8,8 +8,8 @@ use crate::state::{AppState, PerfSample, Phase};
 use crate::whisper::Transcriber;
 use crate::{audio, insert, model};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
 use std::time::Instant;
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Serialize)]
 struct TranscriptEvent {
@@ -127,7 +127,12 @@ fn stop_and_process(app: &AppHandle) {
     });
 }
 
-fn process_capture(app: &AppHandle, capture: audio::Capture, capture_ms: u64, stop_pressed_at: Instant) {
+fn process_capture(
+    app: &AppHandle,
+    capture: audio::Capture,
+    capture_ms: u64,
+    stop_pressed_at: Instant,
+) {
     let state = app.state::<AppState>();
     let sample_count = capture.samples.len();
 

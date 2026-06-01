@@ -183,7 +183,8 @@ pub fn download_model(
                     dl.total = total;
                 }
                 let done = total.is_some_and(|t| downloaded >= t);
-                let should_emit = done || last_emit.elapsed() >= std::time::Duration::from_millis(120);
+                let should_emit =
+                    done || last_emit.elapsed() >= std::time::Duration::from_millis(120);
                 if should_emit {
                     last_emit = std::time::Instant::now();
                     let _ = app_for_progress.emit(
