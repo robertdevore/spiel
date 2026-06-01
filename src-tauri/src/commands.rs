@@ -3,7 +3,7 @@
 
 use crate::config::Config;
 use crate::dictation;
-use crate::error::to_command_error;
+use crate::error::{to_command_error, Result as SpielResult};
 use crate::state::{AppState, StatusSnapshot};
 use crate::{accessibility, model};
 use serde::Serialize;
@@ -60,26 +60,55 @@ pub fn update_config(
         (c.hotkey.clone(), c.model.clone())
     };
 
-    // Reject an unregistrable hotkey before persisting anything, so the saved value and
-    // the actually-registered shortcut never disagree.
+    // Reject syntactically-invalid hotkeys before we touch persistence or runtime state.
     if validated.hotkey != old_hotkey {
         crate::validate_hotkey(&validated.hotkey).map_err(to_command_error)?;
     }
 
-    validated
-        .save(&state.paths.config_file)
-        .map_err(to_command_error)?;
+    // Keep persisted config and active hotkey consistent. If saving fails after a hotkey
+    // change, roll the runtime registration back to the previous value.
+    apply_hotkey_and_persist(
+        &old_hotkey,
+        &validated.hotkey,
+        |hotkey| crate::register_hotkey(&app, hotkey),
+        || validated.save(&state.paths.config_file),
+    )
+    .map_err(to_command_error)?;
+
     *state.config.lock().unwrap() = validated.clone();
 
-    if validated.hotkey != old_hotkey {
-        crate::register_hotkey(&app, &validated.hotkey).map_err(to_command_error)?;
-    }
     if validated.model != old_model {
         dictation::clear_model_cache(&state);
     }
 
     dictation::emit_status(&app);
     Ok(validated)
+}
+
+fn apply_hotkey_and_persist<FRegister, FSave>(
+    old_hotkey: &str,
+    new_hotkey: &str,
+    mut register: FRegister,
+    save: FSave,
+) -> SpielResult<()>
+where
+    FRegister: FnMut(&str) -> SpielResult<()>,
+    FSave: FnOnce() -> SpielResult<()>,
+{
+    let hotkey_changed = new_hotkey != old_hotkey;
+
+    if hotkey_changed {
+        register(new_hotkey)?;
+    }
+
+    if let Err(e) = save() {
+        if hotkey_changed {
+            let _ = register(old_hotkey);
+        }
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -203,4 +232,77 @@ pub fn request_accessibility() -> bool {
 #[tauri::command]
 pub fn show_settings(app: AppHandle) {
     dictation::show_settings_window(&app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::SpielError;
+    use std::cell::RefCell;
+
+    #[test]
+    fn registers_new_hotkey_then_persists() {
+        let calls = RefCell::new(Vec::<String>::new());
+
+        let result = apply_hotkey_and_persist(
+            "Cmd+Alt+D",
+            "Cmd+Shift+K",
+            |hk| {
+                calls.borrow_mut().push(format!("register:{hk}"));
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("save".into());
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(calls.into_inner(), vec!["register:Cmd+Shift+K", "save"]);
+    }
+
+    #[test]
+    fn rolls_back_hotkey_if_save_fails() {
+        let calls = RefCell::new(Vec::<String>::new());
+
+        let result = apply_hotkey_and_persist(
+            "Cmd+Alt+D",
+            "Cmd+Shift+K",
+            |hk| {
+                calls.borrow_mut().push(format!("register:{hk}"));
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("save".into());
+                Err(SpielError::Config("disk full".into()))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            calls.into_inner(),
+            vec!["register:Cmd+Shift+K", "save", "register:Cmd+Alt+D"]
+        );
+    }
+
+    #[test]
+    fn unchanged_hotkey_only_persists() {
+        let calls = RefCell::new(Vec::<String>::new());
+
+        let result = apply_hotkey_and_persist(
+            "Cmd+Alt+D",
+            "Cmd+Alt+D",
+            |hk| {
+                calls.borrow_mut().push(format!("register:{hk}"));
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("save".into());
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(calls.into_inner(), vec!["save"]);
+    }
 }
