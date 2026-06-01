@@ -62,7 +62,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `language` (`en`, `auto`)
 - `auto_paste`
 - `restore_clipboard`
+- `keep_model_loaded`
+- `transcription_threads` (`1..8`)
 - `max_seconds`
+
+Default memory-focused settings:
+
+- `model = tiny.en`
+- `keep_model_loaded = false`
+- `transcription_threads = 2`
 
 ## Performance And Profiling
 
@@ -78,6 +86,26 @@ Enable profiling mode:
 ```bash
 SPIEL_PROFILE=1 npm run tauri dev
 ```
+
+### Memory Target Recipe (<100MB idle)
+
+For the lowest practical idle memory footprint:
+
+1. Use `Tiny` model.
+2. Keep **model loaded in memory** set to `OFF`.
+3. Set **Transcription threads** to `1` or `2`.
+4. After dictation, use **Unload Model From Memory Now** if needed.
+
+### Compare Base vs Small Model Memory
+
+1. Start app: `npm run tauri dev`
+2. Open Settings.
+3. Apply **Balanced** profile (`base.en`, unload model, 2 threads).
+4. Dictate once, stop, and note memory usage in Activity Monitor.
+5. Apply **Quality** profile (`small.en`, unload model, 2 threads).
+6. Repeat and compare.
+7. Toggle `keep_model_loaded` on/off for each model to see idle memory impact.
+8. Try `transcription_threads=1`, `2`, and `4` to compare memory/latency tradeoffs.
 
 When enabled, the settings UI shows a **Performance Profile** card with rolling latency stats:
 

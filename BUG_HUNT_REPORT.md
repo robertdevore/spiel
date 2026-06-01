@@ -343,3 +343,26 @@ Added built-in profiling mode for real-world latency validation and tuning:
   - `clear_perf_samples`
 - Frontend Performance Profile card in settings window (visible when `SPIEL_PROFILE=1`).
 - Runtime tuning env vars documented in README.
+
+## Memory Reduction Checklist (<100MB Idle Goal)
+
+Implemented in this round:
+
+1. Switch default model to `tiny.en` (lower model footprint than `base.en`).
+2. Add `keep_model_loaded` setting and default it to `false`.
+3. Unload cached model automatically after each dictation when `keep_model_loaded=false`.
+4. Add `transcription_threads` setting and clamp to `1..8`.
+5. Use configured thread count in Whisper decode path to cap thread-stack overhead.
+6. Keep environment override (`SPIEL_WHISPER_THREADS`) for force-limiting thread usage in production.
+7. Add explicit UI guidance for memory-first operation (Tiny + unload + low threads).
+8. Add manual `unload_model_from_memory` command to force immediate memory release.
+9. Add “Unload Model From Memory Now” button in settings for no-restart memory recovery.
+10. Drop large capture buffer as soon as transcription completes (`drop(capture)`).
+11. Keep status hot-path model checks metadata-only (`is_installed` no full file parse).
+
+Verification for this round:
+
+- `npm run build`
+- `cargo fmt --check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features -- -D warnings`
