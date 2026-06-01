@@ -72,11 +72,7 @@ pub fn spec(id: &str) -> Option<&'static ModelSpec> {
 pub fn is_installed(model_dir: &Path, id: &str) -> bool {
     let Some(spec) = spec(id) else { return false };
     let path = model_dir.join(spec.filename);
-    // Hot path for status polling/UI refresh: avoid opening/reading the model file.
-    // Strict GGML validation still runs after download and during model load.
-    std::fs::metadata(path)
-        .map(|m| m.len() >= min_size_bytes(spec))
-        .unwrap_or(false)
+    validate_file(&path, spec).is_ok()
 }
 
 /// Download `spec` to `model_dir`, calling `on_progress(downloaded, total)` as it goes.
@@ -248,6 +244,22 @@ mod tests {
         std::fs::write(&path, b"NOTAMODEL").unwrap();
         let s = spec("base.en").unwrap();
         assert!(validate_file(&path, s).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn malformed_file_is_not_installed() {
+        let dir = std::env::temp_dir().join("spiel_model_installed_check");
+        let _ = std::fs::create_dir_all(&dir);
+        let s = spec("tiny.en").unwrap();
+        let path = dir.join(s.filename);
+        // Large enough to pass size-only checks, but invalid GGML content.
+        std::fs::write(
+            &path,
+            vec![0_u8; (s.approx_mb as usize * 1024 * 1024 / 2) + 1024],
+        )
+        .unwrap();
+        assert!(!is_installed(&dir, "tiny.en"));
         let _ = std::fs::remove_file(&path);
     }
 
