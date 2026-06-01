@@ -37,7 +37,15 @@ pub fn run() {
                 config_file: config_dir.join("config.json"),
                 model_dir: data_dir.join("models"),
             };
-            let config = Config::load(&paths.config_file).unwrap_or_default();
+            let config = match Config::load(&paths.config_file) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    eprintln!("[spiel] settings load failed, using defaults: {e}");
+                    let cfg = Config::default();
+                    let _ = cfg.save(&paths.config_file);
+                    cfg
+                }
+            };
             let hotkey = config.hotkey.clone();
 
             app.manage(AppState::new(paths, config));
@@ -77,6 +85,7 @@ pub fn run() {
             commands::download_model,
             commands::cancel_download,
             commands::toggle_dictation,
+            commands::unload_model_from_memory,
             commands::accessibility_status,
             commands::request_accessibility,
             commands::show_settings,
