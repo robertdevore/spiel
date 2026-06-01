@@ -65,9 +65,9 @@ pub fn update_config(
 ) -> Result<Config, String> {
     let validated = config.validated().map_err(to_command_error)?;
 
-    let (old_hotkey, old_model) = {
+    let (old_hotkey, old_model, old_keep_model_loaded) = {
         let c = state.config.lock().unwrap();
-        (c.hotkey.clone(), c.model.clone())
+        (c.hotkey.clone(), c.model.clone(), c.keep_model_loaded)
     };
 
     // Reject syntactically-invalid hotkeys before we touch persistence or runtime state.
@@ -87,7 +87,7 @@ pub fn update_config(
 
     *state.config.lock().unwrap() = validated.clone();
 
-    if validated.model != old_model {
+    if validated.model != old_model || (old_keep_model_loaded && !validated.keep_model_loaded) {
         dictation::clear_model_cache(&state);
     }
 
@@ -235,6 +235,12 @@ pub fn cancel_download(state: State<AppState>) {
 #[tauri::command]
 pub fn toggle_dictation(app: AppHandle) {
     dictation::toggle(&app);
+}
+
+#[tauri::command]
+pub fn unload_model_from_memory(app: AppHandle, state: State<AppState>) {
+    dictation::clear_model_cache(&state);
+    dictation::emit_status(&app);
 }
 
 #[tauri::command]
