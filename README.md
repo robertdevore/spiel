@@ -94,6 +94,33 @@ All of the above are green.
 `hotkey`, `model`, `language` (en/auto), `auto_paste`, `restore_clipboard`,
 `max_seconds`. Stored as readable JSON in the app config directory.
 
+## Performance Tuning
+
+Spiel is optimized for low stop-to-text latency, but heavily loaded systems can still
+benefit from tuning:
+
+- `SPIEL_WHISPER_THREADS` — override transcription thread count (`1..16`).
+- `SPIEL_PRE_PASTE_DELAY_MS` — clipboard settle delay before Cmd+V (default `60`).
+- `SPIEL_RESTORE_DELAY_MS` — delay before restoring previous clipboard (default `220`).
+- `SPIEL_LATENCY_BUDGET_MS` — budget threshold for profiling warnings (default `8000`).
+- `SPIEL_PROFILE=1` — enable built-in per-stage profiling.
+
+### Profiling Mode
+
+With `SPIEL_PROFILE=1`, Spiel records rolling timing samples for:
+
+- capture finalize latency
+- transcription latency
+- insertion latency
+- total stop-to-result latency
+
+The settings window shows a Performance Profile card with:
+
+- sample count
+- average / p95 / max total latency
+- count over latency budget
+- last-sample stage breakdown
+
 ## Architecture
 
 | File | Responsibility |
