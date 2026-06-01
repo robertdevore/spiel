@@ -152,19 +152,36 @@ fn process_capture(
         return;
     }
 
-    let language = state.config.lock().unwrap().language.clone();
+    let (language, threads, keep_model_loaded) = {
+        let c = state.config.lock().unwrap();
+        (
+            c.language.clone(),
+            c.transcription_threads,
+            c.keep_model_loaded,
+        )
+    };
 
+    let transcribe_started_at = Instant::now();
     let transcriber = match ensure_transcriber(&state) {
         Ok(t) => t,
         Err(e) => {
+            state.record_perf_sample(PerfSample {
+                wall_time_ms: 0,
+                capture_ms,
+                transcribe_ms: transcribe_started_at.elapsed().as_millis() as u64,
+                insert_ms: 0,
+                total_ms: stop_pressed_at.elapsed().as_millis() as u64,
+                audio_samples: sample_count,
+                text_chars: 0,
+                outcome: "model_load_error".into(),
+            });
             state.set_phase(Phase::Error, Some(e.to_string()));
             emit_status(app);
             return;
         }
     };
 
-    let transcribe_started_at = Instant::now();
-    let text = match transcriber.transcribe(&capture.samples, &language) {
+    let text = match transcriber.transcribe(&capture.samples, &language, threads) {
         Ok(t) => t,
         Err(e) => {
             state.record_perf_sample(PerfSample {
@@ -183,6 +200,10 @@ fn process_capture(
         }
     };
     let transcribe_ms = transcribe_started_at.elapsed().as_millis() as u64;
+    drop(capture);
+    if !keep_model_loaded {
+        clear_model_cache(&state);
+    }
 
     if text.trim().is_empty() {
         state.record_perf_sample(PerfSample {
