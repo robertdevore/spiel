@@ -43,12 +43,48 @@ interface TranscriptEvent {
   };
 }
 
+interface PerfSample {
+  wall_time_ms: number;
+  capture_ms: number;
+  transcribe_ms: number;
+  insert_ms: number;
+  total_ms: number;
+  audio_samples: number;
+  text_chars: number;
+  outcome: string;
+}
+
+interface PerfSnapshot {
+  enabled: boolean;
+  budget_ms: number;
+  sample_count: number;
+  average_total_ms: number;
+  p95_total_ms: number;
+  max_total_ms: number;
+  over_budget_count: number;
+  last: PerfSample | null;
+}
+
+interface PerfEvent {
+  capture_ms: number;
+  transcribe_ms: number;
+  insert_ms: number;
+  total_ms: number;
+  text_chars: number;
+  outcome: string;
+}
+
 // ── Module state ────────────────────────────────────────────────────────────
 let status: StatusSnapshot | null = null;
 let config: Config | null = null;
 let models: ModelView[] = [];
 let lastTranscript = "";
 let lastError = "";
+let perf: PerfSnapshot | null = null;
+let refreshInFlight = false;
+let renderQueued = false;
+let recordingAnchorMs: number | null = null;
+let recordingBaseElapsedMs = 0;
 const downloads: Record<string, { downloaded: number; total: number | null }> = {};
 
 const app = document.getElementById("app")!;
@@ -68,16 +104,50 @@ function fmtBytes(n: number): string {
 }
 
 async function refreshAll() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
   try {
     [status, config, models] = await Promise.all([
       invoke<StatusSnapshot>("get_status"),
       invoke<Config>("get_config"),
       invoke<ModelView[]>("list_models"),
     ]);
+    perf = await invoke<PerfSnapshot>("get_perf_snapshot");
+    syncRecordingClock();
   } catch (e) {
     console.error("Backend unavailable:", e);
+  } finally {
+    refreshInFlight = false;
   }
   render();
+}
+
+async function refreshStatusOnly() {
+  try {
+    status = await invoke<StatusSnapshot>("get_status");
+    syncRecordingClock();
+    render();
+  } catch (e) {
+    console.error("Status refresh failed:", e);
+  }
+}
+
+async function refreshPerfOnly() {
+  try {
+    perf = await invoke<PerfSnapshot>("get_perf_snapshot");
+    render();
+  } catch (e) {
+    console.error("Perf refresh failed:", e);
+  }
+}
+
+async function refreshModelsOnly() {
+  try {
+    models = await invoke<ModelView[]>("list_models");
+    render();
+  } catch (e) {
+    console.error("Model refresh failed:", e);
+  }
 }
 
 async function saveConfig(patch: Partial<Config>) {
@@ -85,10 +155,40 @@ async function saveConfig(patch: Partial<Config>) {
   const next = { ...config, ...patch };
   try {
     config = await invoke<Config>("update_config", { config: next });
+    await refreshStatusOnly();
+    if (patch.model !== undefined) {
+      await refreshModelsOnly();
+    } else {
+      render();
+    }
   } catch (e) {
     setError(`Could not save settings: ${e}`);
   }
-  await refreshAll();
+}
+
+function syncRecordingClock() {
+  if (!status || status.phase !== "recording") {
+    recordingAnchorMs = null;
+    recordingBaseElapsedMs = 0;
+    return;
+  }
+  recordingBaseElapsedMs = status.recording_elapsed_ms;
+  recordingAnchorMs = Date.now();
+}
+
+function currentElapsedMs(s: StatusSnapshot): number {
+  if (s.phase !== "recording") return 0;
+  if (recordingAnchorMs == null) return s.recording_elapsed_ms;
+  return recordingBaseElapsedMs + Math.max(0, Date.now() - recordingAnchorMs);
+}
+
+function queueRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    render();
+  });
 }
 
 // ── Render ──────────────────────────────────────────────────────────────────
@@ -110,6 +210,7 @@ function render() {
   app.appendChild(transcriptCard());
   app.appendChild(modelsCard());
   app.appendChild(settingsCard(c));
+  if (perf?.enabled) app.appendChild(perfCard(perf));
   app.appendChild(privacyEl());
 }
 
@@ -146,15 +247,23 @@ function statusCard(s: StatusSnapshot, c: Config): HTMLElement {
   card.className = "card";
   const recording = s.phase === "recording";
   const busy = s.phase === "transcribing" || s.phase === "inserting";
-  const elapsed = recording ? ` ${(s.recording_elapsed_ms / 1000).toFixed(1)}s` : "";
+  const elapsed = recording ? ` ${(currentElapsedMs(s) / 1000).toFixed(1)}s` : "";
 
-  card.innerHTML = `
-    <div class="status-row">
-      <span class="dot ${s.phase}"></span>
-      <span class="status-text">${PHASE_LABEL[s.phase]}${elapsed}</span>
-    </div>
-    <div class="status-msg">${s.message ?? ""}</div>
-  `;
+  const row = document.createElement("div");
+  row.className = "status-row";
+  const dot = document.createElement("span");
+  dot.className = `dot ${s.phase}`;
+  const statusText = document.createElement("span");
+  statusText.className = "status-text";
+  statusText.textContent = `${PHASE_LABEL[s.phase]}${elapsed}`;
+  row.appendChild(dot);
+  row.appendChild(statusText);
+  card.appendChild(row);
+
+  const statusMsg = document.createElement("div");
+  statusMsg.className = "status-msg";
+  statusMsg.textContent = s.message ?? "";
+  card.appendChild(statusMsg);
 
   const btn = document.createElement("button");
   btn.className = `big-btn ${recording ? "recording" : "primary"}`;
@@ -165,7 +274,12 @@ function statusCard(s: StatusSnapshot, c: Config): HTMLElement {
 
   const hint = document.createElement("div");
   hint.className = "privacy";
-  hint.innerHTML = `Press <span class="kbd">${c.hotkey}</span> anywhere to toggle.`;
+  hint.append("Press ");
+  const key = document.createElement("span");
+  key.className = "kbd";
+  key.textContent = c.hotkey;
+  hint.appendChild(key);
+  hint.append(" anywhere to toggle.");
   card.appendChild(hint);
 
   if (!s.model_installed) {
@@ -189,7 +303,7 @@ function accessibilityCard(s: StatusSnapshot): HTMLElement {
     btn.textContent = "Grant Accessibility…";
     btn.onclick = async () => {
       await invoke("request_accessibility").catch((e) => console.error(e));
-      setTimeout(refreshAll, 500);
+      setTimeout(refreshStatusOnly, 500);
     };
     card.appendChild(btn);
   }
@@ -317,6 +431,41 @@ function privacyEl(): HTMLElement {
   return el;
 }
 
+function perfCard(p: PerfSnapshot): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<p class="section-title">Performance Profile</p>`;
+
+  const summary = document.createElement("div");
+  summary.className = "privacy";
+  summary.textContent =
+    `Samples: ${p.sample_count} · Avg: ${p.average_total_ms}ms · P95: ${p.p95_total_ms}ms · ` +
+    `Max: ${p.max_total_ms}ms · Over budget (${p.budget_ms}ms): ${p.over_budget_count}`;
+  card.appendChild(summary);
+
+  if (p.last) {
+    const last = document.createElement("div");
+    last.className = "privacy";
+    last.textContent =
+      `Last: total ${p.last.total_ms}ms (capture ${p.last.capture_ms}ms, transcribe ${p.last.transcribe_ms}ms, ` +
+      `insert ${p.last.insert_ms}ms) · chars ${p.last.text_chars} · outcome ${p.last.outcome}`;
+    card.appendChild(last);
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "row";
+  const clearBtn = document.createElement("button");
+  clearBtn.textContent = "Clear Profile Samples";
+  clearBtn.onclick = async () => {
+    await invoke("clear_perf_samples").catch((e) => setError(`Could not clear profile samples: ${e}`));
+    await refreshPerfOnly();
+  };
+  controls.appendChild(clearBtn);
+  card.appendChild(controls);
+
+  return card;
+}
+
 // ── Small field builders ────────────────────────────────────────────────────
 function textField(
   label: string,
@@ -387,11 +536,15 @@ function escapeHtml(s: string): string {
 async function init() {
   await listen<StatusSnapshot>("status", (e) => {
     status = e.payload;
-    render();
+    syncRecordingClock();
+    queueRender();
   });
   await listen<TranscriptEvent>("transcript", (e) => {
     lastTranscript = e.payload.text;
-    render();
+    queueRender();
+  });
+  await listen<PerfEvent>("perf", () => {
+    refreshPerfOnly();
   });
   await listen<{ model_id: string; downloaded: number; total: number | null }>(
     "model-progress",
@@ -400,7 +553,7 @@ async function init() {
         downloaded: e.payload.downloaded,
         total: e.payload.total,
       };
-      render();
+      queueRender();
     },
   );
   await listen<{ model_id: string; ok: boolean; error: string | null }>("model-done", (e) => {
@@ -413,10 +566,10 @@ async function init() {
     refreshAll();
   });
 
-  // Keep the elapsed timer ticking while recording.
+  // Keep the on-screen elapsed timer smooth without polling backend status.
   setInterval(() => {
-    if (status?.phase === "recording") refreshAll();
-  }, 250);
+    if (status?.phase === "recording") queueRender();
+  }, 100);
 
   await refreshAll();
 }

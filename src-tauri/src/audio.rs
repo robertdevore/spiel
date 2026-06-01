@@ -61,7 +61,7 @@ impl Recorder {
         let _ = self.stop_tx.send(());
         let raw = self
             .result_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
+            .recv_timeout(std::time::Duration::from_secs(3))
             .map_err(|_| SpielError::Audio("recording thread did not return in time".into()))?;
 
         let mono = downmix_to_mono(&raw, self.in_channels);
@@ -130,7 +130,7 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
                 *e = started.elapsed().as_millis() as u64;
             }
             if stop_rx
-                .recv_timeout(std::time::Duration::from_millis(50))
+                .recv_timeout(std::time::Duration::from_millis(20))
                 .is_ok()
             {
                 break;
@@ -172,7 +172,8 @@ fn build_stream(
                     if buf.len() >= max_samples {
                         return;
                     }
-                    buf.extend(data.iter().map(|&s| ($to_f32)(s)));
+                    let remaining = max_samples - buf.len();
+                    buf.extend(data.iter().take(remaining).map(|&s| ($to_f32)(s)));
                 },
                 err_fn,
                 None,

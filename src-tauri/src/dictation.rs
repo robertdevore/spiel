@@ -4,16 +4,27 @@
 //! previous build, where the hotkey and the commands did different things).
 
 use crate::error::SpielError;
-use crate::state::{AppState, Phase};
+use crate::state::{AppState, PerfSample, Phase};
 use crate::whisper::Transcriber;
 use crate::{audio, insert, model};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use std::time::Instant;
 
 #[derive(Clone, Serialize)]
 struct TranscriptEvent {
     text: String,
     outcome: insert::InsertOutcome,
+}
+
+#[derive(Clone, Serialize)]
+struct PerfEvent {
+    capture_ms: u64,
+    transcribe_ms: u64,
+    insert_ms: u64,
+    total_ms: u64,
+    text_chars: usize,
+    outcome: String,
 }
 
 /// Push the current status to the UI and reflect it in the menu-bar title.
@@ -87,6 +98,7 @@ fn start(app: &AppHandle) {
 
 fn stop_and_process(app: &AppHandle) {
     let state = app.state::<AppState>();
+    let stop_pressed_at = Instant::now();
 
     let recorder = state.recorder.lock().unwrap().take();
     let Some(recorder) = recorder else {
@@ -103,6 +115,7 @@ fn stop_and_process(app: &AppHandle) {
             return;
         }
     };
+    let capture_ms = stop_pressed_at.elapsed().as_millis() as u64;
 
     state.set_phase(Phase::Transcribing, None);
     emit_status(app);
@@ -110,14 +123,25 @@ fn stop_and_process(app: &AppHandle) {
     // Transcription is CPU-heavy; never block the main thread with it.
     let app = app.clone();
     std::thread::spawn(move || {
-        process_capture(&app, capture);
+        process_capture(&app, capture, capture_ms, stop_pressed_at);
     });
 }
 
-fn process_capture(app: &AppHandle, capture: audio::Capture) {
+fn process_capture(app: &AppHandle, capture: audio::Capture, capture_ms: u64, stop_pressed_at: Instant) {
     let state = app.state::<AppState>();
+    let sample_count = capture.samples.len();
 
     if capture.is_effectively_silent() {
+        state.record_perf_sample(PerfSample {
+            wall_time_ms: 0,
+            capture_ms,
+            transcribe_ms: 0,
+            insert_ms: 0,
+            total_ms: stop_pressed_at.elapsed().as_millis() as u64,
+            audio_samples: sample_count,
+            text_chars: 0,
+            outcome: "silent".into(),
+        });
         state.set_phase(Phase::Idle, Some("No speech detected.".into()));
         emit_status(app);
         return;
@@ -134,16 +158,38 @@ fn process_capture(app: &AppHandle, capture: audio::Capture) {
         }
     };
 
+    let transcribe_started_at = Instant::now();
     let text = match transcriber.transcribe(&capture.samples, &language) {
         Ok(t) => t,
         Err(e) => {
+            state.record_perf_sample(PerfSample {
+                wall_time_ms: 0,
+                capture_ms,
+                transcribe_ms: transcribe_started_at.elapsed().as_millis() as u64,
+                insert_ms: 0,
+                total_ms: stop_pressed_at.elapsed().as_millis() as u64,
+                audio_samples: sample_count,
+                text_chars: 0,
+                outcome: "transcription_error".into(),
+            });
             state.set_phase(Phase::Error, Some(e.to_string()));
             emit_status(app);
             return;
         }
     };
+    let transcribe_ms = transcribe_started_at.elapsed().as_millis() as u64;
 
     if text.trim().is_empty() {
+        state.record_perf_sample(PerfSample {
+            wall_time_ms: 0,
+            capture_ms,
+            transcribe_ms,
+            insert_ms: 0,
+            total_ms: stop_pressed_at.elapsed().as_millis() as u64,
+            audio_samples: sample_count,
+            text_chars: 0,
+            outcome: "empty".into(),
+        });
         state.set_phase(Phase::Idle, Some("No speech detected.".into()));
         emit_status(app);
         return;
@@ -160,8 +206,11 @@ fn process_capture(app: &AppHandle, capture: audio::Capture) {
     // Clipboard access and Cmd+V synthesis go through AppKit/CoreGraphics, which must run
     // on the main thread — doing this on the worker thread crashes the app. Marshal it.
     let app = app.clone();
+    let text_chars = text.chars().count();
+    let insert_started_at = Instant::now();
     let _ = app.clone().run_on_main_thread(move || {
         let state = app.state::<AppState>();
+        let mut sample_outcome = "insert_error".to_string();
         match insert::insert(&text, auto_paste, restore) {
             Ok(outcome) => {
                 state.status.lock().unwrap().needs_accessibility = outcome.needs_accessibility;
@@ -172,6 +221,13 @@ fn process_capture(app: &AppHandle, capture: audio::Capture) {
                 } else {
                     None
                 };
+                sample_outcome = if outcome.pasted {
+                    "pasted".into()
+                } else if outcome.clipboard_only {
+                    "clipboard_only".into()
+                } else {
+                    "insert_ok".into()
+                };
                 state.set_phase(Phase::Idle, message);
                 let _ = app.emit("transcript", TranscriptEvent { text, outcome });
             }
@@ -179,6 +235,28 @@ fn process_capture(app: &AppHandle, capture: audio::Capture) {
                 state.set_phase(Phase::Error, Some(e.to_string()));
             }
         }
+        let sample = PerfSample {
+            wall_time_ms: 0,
+            capture_ms,
+            transcribe_ms,
+            insert_ms: insert_started_at.elapsed().as_millis() as u64,
+            total_ms: stop_pressed_at.elapsed().as_millis() as u64,
+            audio_samples: sample_count,
+            text_chars,
+            outcome: sample_outcome.clone(),
+        };
+        state.record_perf_sample(sample.clone());
+        let _ = app.emit(
+            "perf",
+            PerfEvent {
+                capture_ms: sample.capture_ms,
+                transcribe_ms: sample.transcribe_ms,
+                insert_ms: sample.insert_ms,
+                total_ms: sample.total_ms,
+                text_chars: sample.text_chars,
+                outcome: sample_outcome,
+            },
+        );
         emit_status(&app);
     });
 }

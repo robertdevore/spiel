@@ -48,12 +48,27 @@ impl Config {
             return Err(SpielError::Config("Hotkey cannot be empty.".into()));
         }
         self.hotkey = self.hotkey.trim().to_string();
-        if self.model.trim().is_empty() {
+
+        let model = self.model.trim();
+        if model.is_empty() {
+            self.model = Config::default().model;
+        } else if crate::model::spec(model).is_some() {
+            self.model = model.to_string();
+        } else {
+            // Keep startup resilient to manual config edits or old values.
             self.model = Config::default().model;
         }
-        if self.language.trim().is_empty() {
+
+        let language = self.language.trim().to_ascii_lowercase();
+        if language.is_empty() {
+            self.language = "auto".into();
+        } else if language == "en" || language == "auto" {
+            self.language = language;
+        } else {
+            // Unknown hints should not break transcription; let Whisper auto-detect.
             self.language = "auto".into();
         }
+
         // Keep recordings sane: 5s..=600s.
         self.max_seconds = self.max_seconds.clamp(5, 600);
         Ok(self)
@@ -98,5 +113,40 @@ pub struct Paths {
 impl Paths {
     pub fn model_path(&self, filename: &str) -> PathBuf {
         self.model_dir.join(filename)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_model_falls_back_to_default() {
+        let cfg = Config {
+            model: "unknown-model".into(),
+            ..Config::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(cfg.model, Config::default().model);
+    }
+
+    #[test]
+    fn language_normalizes_and_falls_back_to_auto() {
+        let cfg = Config {
+            language: " EN ".into(),
+            ..Config::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(cfg.language, "en");
+
+        let cfg2 = Config {
+            language: "spanish".into(),
+            ..Config::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(cfg2.language, "auto");
     }
 }

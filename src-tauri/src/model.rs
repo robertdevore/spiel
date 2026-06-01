@@ -72,7 +72,11 @@ pub fn spec(id: &str) -> Option<&'static ModelSpec> {
 pub fn is_installed(model_dir: &Path, id: &str) -> bool {
     let Some(spec) = spec(id) else { return false };
     let path = model_dir.join(spec.filename);
-    validate_file(&path, spec).is_ok()
+    // Hot path for status polling/UI refresh: avoid opening/reading the model file.
+    // Strict GGML validation still runs after download and during model load.
+    std::fs::metadata(path)
+        .map(|m| m.len() >= min_size_bytes(spec))
+        .unwrap_or(false)
 }
 
 /// Download `spec` to `model_dir`, calling `on_progress(downloaded, total)` as it goes.
@@ -139,6 +143,11 @@ pub fn download(
     file.sync_all().ok();
     drop(file);
 
+    if let Err(e) = ensure_complete_download(total, downloaded) {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(e);
+    }
+
     // Verify pinned hash (when present) before we trust the bytes.
     if !spec.sha256.is_empty() {
         let got = hex(&hasher.finalize());
@@ -172,13 +181,17 @@ fn validate_file(path: &Path, spec: &ModelSpec) -> Result<()> {
     }
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     // Guard against a header-only stub; require at least half the expected size.
-    let min = (spec.approx_mb as u64) * 1024 * 1024 / 2;
+    let min = min_size_bytes(spec);
     if len < min {
         return Err(SpielError::Model(
             "model file is smaller than expected".into(),
         ));
     }
     Ok(())
+}
+
+fn min_size_bytes(spec: &ModelSpec) -> u64 {
+    (spec.approx_mb as u64) * 1024 * 1024 / 2
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -188,6 +201,17 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+fn ensure_complete_download(total: Option<u64>, downloaded: u64) -> Result<()> {
+    if let Some(expected) = total {
+        if downloaded != expected {
+            return Err(SpielError::Download(format!(
+                "download incomplete: expected {expected} bytes, got {downloaded}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -225,5 +249,16 @@ mod tests {
         let s = spec("base.en").unwrap();
         assert!(validate_file(&path, s).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn detects_incomplete_download_when_length_known() {
+        let err = ensure_complete_download(Some(100), 90).unwrap_err();
+        assert!(err.to_string().contains("download incomplete"));
+    }
+
+    #[test]
+    fn allows_download_when_length_unknown() {
+        assert!(ensure_complete_download(None, 90).is_ok());
     }
 }

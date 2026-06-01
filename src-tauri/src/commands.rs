@@ -4,7 +4,7 @@
 use crate::config::Config;
 use crate::dictation;
 use crate::error::{to_command_error, Result as SpielResult};
-use crate::state::{AppState, StatusSnapshot};
+use crate::state::{AppState, PerfSnapshot, StatusSnapshot};
 use crate::{accessibility, model};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +43,16 @@ pub fn get_status(state: State<AppState>) -> StatusSnapshot {
 #[tauri::command]
 pub fn get_config(state: State<AppState>) -> Config {
     state.config.lock().unwrap().clone()
+}
+
+#[tauri::command]
+pub fn get_perf_snapshot(state: State<AppState>) -> PerfSnapshot {
+    state.perf_snapshot()
+}
+
+#[tauri::command]
+pub fn clear_perf_samples(state: State<AppState>) {
+    state.clear_perf_samples();
 }
 
 /// Validate, persist, and apply a new config. Re-registers the hotkey and invalidates the
@@ -98,7 +108,10 @@ where
     let hotkey_changed = new_hotkey != old_hotkey;
 
     if hotkey_changed {
-        register(new_hotkey)?;
+        if let Err(e) = register(new_hotkey) {
+            let _ = register(old_hotkey);
+            return Err(e);
+        }
     }
 
     if let Err(e) = save() {
@@ -138,6 +151,9 @@ pub fn download_model(
     let Some(spec) = model::spec(&model_id) else {
         return Err(format!("Unknown model '{model_id}'."));
     };
+    if model::is_installed(&state.paths.model_dir, &model_id) {
+        return Err(format!("Model '{model_id}' is already installed."));
+    }
 
     {
         let mut dl = state.download.lock().unwrap();
@@ -156,6 +172,7 @@ pub fn download_model(
     std::thread::spawn(move || {
         let app_for_progress = app.clone();
         let id_for_progress = model_id.clone();
+        let mut last_emit = std::time::Instant::now();
         let result = model::download(
             &model_dir,
             spec,
@@ -165,14 +182,19 @@ pub fn download_model(
                     dl.downloaded = downloaded;
                     dl.total = total;
                 }
-                let _ = app_for_progress.emit(
-                    "model-progress",
-                    ModelProgress {
-                        model_id: id_for_progress.clone(),
-                        downloaded,
-                        total,
-                    },
-                );
+                let done = total.is_some_and(|t| downloaded >= t);
+                let should_emit = done || last_emit.elapsed() >= std::time::Duration::from_millis(120);
+                if should_emit {
+                    last_emit = std::time::Instant::now();
+                    let _ = app_for_progress.emit(
+                        "model-progress",
+                        ModelProgress {
+                            model_id: id_for_progress.clone(),
+                            downloaded,
+                            total,
+                        },
+                    );
+                }
             },
             || cancel.load(Ordering::Relaxed),
         );
@@ -304,5 +326,32 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(calls.into_inner(), vec!["save"]);
+    }
+
+    #[test]
+    fn restores_previous_hotkey_when_new_registration_fails() {
+        let calls = RefCell::new(Vec::<String>::new());
+
+        let result = apply_hotkey_and_persist(
+            "Cmd+Alt+D",
+            "Cmd+Shift+K",
+            |hk| {
+                calls.borrow_mut().push(format!("register:{hk}"));
+                if hk == "Cmd+Shift+K" {
+                    return Err(SpielError::Config("in use".into()));
+                }
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("save".into());
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            calls.into_inner(),
+            vec!["register:Cmd+Shift+K", "register:Cmd+Alt+D"]
+        );
     }
 }

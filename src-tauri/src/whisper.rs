@@ -45,10 +45,7 @@ impl Transcriber {
             .map_err(|e| SpielError::Transcription(e.to_string()))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get() as i32)
-            .unwrap_or(4);
-        params.set_n_threads(threads);
+        params.set_n_threads(choose_thread_count());
         params.set_translate(false);
         if language != "auto" && !language.is_empty() {
             params.set_language(Some(language));
@@ -115,6 +112,19 @@ fn is_non_speech_tag(lower: &str) -> bool {
     TAGS.contains(&lower)
 }
 
+fn choose_thread_count() -> i32 {
+    if let Ok(raw) = std::env::var("SPIEL_WHISPER_THREADS") {
+        if let Ok(v) = raw.trim().parse::<i32>() {
+            return v.clamp(1, 16);
+        }
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4);
+    // Leave one core for UI/system work so dictation remains responsive under load.
+    (cores - 1).clamp(1, 8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +143,11 @@ mod tests {
     #[test]
     fn empty_stays_empty() {
         assert_eq!(clean_output("   \n  "), "");
+    }
+
+    #[test]
+    fn thread_count_is_bounded() {
+        let n = choose_thread_count();
+        assert!((1..=16).contains(&n));
     }
 }

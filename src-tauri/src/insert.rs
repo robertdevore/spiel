@@ -10,6 +10,9 @@ use crate::accessibility;
 use crate::error::{Result, SpielError};
 use serde::Serialize;
 
+const DEFAULT_PRE_PASTE_DELAY_MS: u64 = 60;
+const DEFAULT_RESTORE_DELAY_MS: u64 = 220;
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct InsertOutcome {
     /// We synthesized Cmd+V and the text should be at the cursor.
@@ -54,7 +57,9 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
 
     // Let the pasteboard write settle before we trigger the paste, so the focused app
     // can't read a stale changeCount.
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    std::thread::sleep(std::time::Duration::from_millis(
+        env_delay_ms("SPIEL_PRE_PASTE_DELAY_MS", DEFAULT_PRE_PASTE_DELAY_MS),
+    ));
     paste_via_cmd_v()?;
     outcome.pasted = true;
 
@@ -64,7 +69,9 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
             // put the old clipboard back. Too short a wait and the app reads the restored
             // (previous) contents instead of the transcript — which looks like Spiel
             // "pasting your clipboard".
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(
+                env_delay_ms("SPIEL_RESTORE_DELAY_MS", DEFAULT_RESTORE_DELAY_MS),
+            ));
             if clipboard.set_text(prev).is_ok() {
                 outcome.restored_previous = true;
             }
@@ -72,6 +79,14 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
     }
 
     Ok(outcome)
+}
+
+fn env_delay_ms(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(0, 2_000))
+        .unwrap_or(default)
 }
 
 /// Synthesize Cmd+V by posting the V keycode with the Command modifier flag set.
