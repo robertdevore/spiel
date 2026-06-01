@@ -21,7 +21,16 @@ interface Config {
   language: string;
   auto_paste: boolean;
   restore_clipboard: boolean;
+  keep_model_loaded: boolean;
+  transcription_threads: number;
   max_seconds: number;
+}
+
+interface MemoryProfile {
+  id: string;
+  label: string;
+  summary: string;
+  patch: Partial<Config>;
 }
 
 interface ModelView {
@@ -82,6 +91,7 @@ let lastTranscript = "";
 let lastError = "";
 let perf: PerfSnapshot | null = null;
 let refreshInFlight = false;
+let refreshRequested = false;
 let renderQueued = false;
 let recordingAnchorMs: number | null = null;
 let recordingBaseElapsedMs = 0;
@@ -98,13 +108,37 @@ const PHASE_LABEL: Record<Phase, string> = {
   error: "Error",
 };
 
+const MEMORY_PROFILES: MemoryProfile[] = [
+  {
+    id: "low",
+    label: "Low Memory",
+    summary: "Tiny model, unload after each run, 1 thread.",
+    patch: { model: "tiny.en", keep_model_loaded: false, transcription_threads: 1 },
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    summary: "Base model, unload after each run, 2 threads.",
+    patch: { model: "base.en", keep_model_loaded: false, transcription_threads: 2 },
+  },
+  {
+    id: "quality",
+    label: "Quality",
+    summary: "Small model, unload after each run, 2 threads.",
+    patch: { model: "small.en", keep_model_loaded: false, transcription_threads: 2 },
+  },
+];
+
 function fmtBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function refreshAll() {
-  if (refreshInFlight) return;
+  if (refreshInFlight) {
+    refreshRequested = true;
+    return;
+  }
   refreshInFlight = true;
   try {
     [status, config, models] = await Promise.all([
@@ -120,6 +154,10 @@ async function refreshAll() {
     refreshInFlight = false;
   }
   render();
+  if (refreshRequested) {
+    refreshRequested = false;
+    void refreshAll();
+  }
 }
 
 async function refreshStatusOnly() {
@@ -415,10 +453,55 @@ function settingsCard(c: Config): HTMLElement {
     ),
   );
   card.appendChild(
+    toggleField("Keep model loaded in memory", c.keep_model_loaded, (v) =>
+      saveConfig({ keep_model_loaded: v }),
+    ),
+  );
+  card.appendChild(
+    numberField("Transcription threads", c.transcription_threads, 1, 8, (v) =>
+      saveConfig({ transcription_threads: v }),
+    ),
+  );
+  card.appendChild(
     numberField("Max recording (seconds)", c.max_seconds, 5, 600, (v) =>
       saveConfig({ max_seconds: v }),
     ),
   );
+
+  const profileTitle = document.createElement("div");
+  profileTitle.className = "section-title";
+  profileTitle.textContent = "Memory / Quality Profiles";
+  card.appendChild(profileTitle);
+
+  for (const profile of MEMORY_PROFILES) {
+    const row = document.createElement("div");
+    row.className = "model";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span class="name">${profile.label}</span><span class="note">${profile.summary}</span>`;
+    row.appendChild(meta);
+    const applyBtn = document.createElement("button");
+    applyBtn.textContent = "Apply";
+    applyBtn.onclick = () => saveConfig(profile.patch);
+    row.appendChild(applyBtn);
+    card.appendChild(row);
+  }
+
+  const unloadBtn = document.createElement("button");
+  unloadBtn.textContent = "Unload Model From Memory Now";
+  unloadBtn.onclick = async () => {
+    await invoke("unload_model_from_memory").catch((e) =>
+      setError(`Could not unload model from memory: ${e}`),
+    );
+    await refreshStatusOnly();
+  };
+  card.appendChild(unloadBtn);
+  const memHint = document.createElement("div");
+  memHint.className = "privacy";
+  memHint.textContent =
+    "For lower memory: use Tiny model, keep model loaded OFF, and set threads to 1-2. " +
+    "This reduces idle RAM significantly at the cost of slower first transcription after each stop.";
+  card.appendChild(memHint);
   return card;
 }
 
@@ -507,7 +590,10 @@ function numberField(
   input.max = String(max);
   input.value = String(value);
   input.onblur = () => {
-    const v = Math.max(min, Math.min(max, Number(input.value) || value));
+    const raw = Number(input.value);
+    const normalized = Number.isFinite(raw) ? Math.round(raw) : value;
+    const v = Math.max(min, Math.min(max, normalized));
+    input.value = String(v);
     if (v !== value) onCommit(v);
   };
   wrap.appendChild(input);
