@@ -27,10 +27,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Current Command Surface (Tauri)
 
-The app currently exposes 13 Tauri commands:
+The app currently exposes 14 Tauri commands:
 
 - `get_status`
 - `get_config`
+- `get_readiness`
 - `get_perf_snapshot`
 - `clear_perf_samples`
 - `update_config`
@@ -74,7 +75,10 @@ Not fully verified in this headless environment:
 
 ## Current Next-Session Backlog
 
-See: `docs/ENTERPRISE_READINESS_NEXT_SESSION.md`.
+See:
+
+- `docs/RELEASE_READINESS_NEXT_SESSION.md`
+- `docs/ENTERPRISE_READINESS_NEXT_SESSION.md`.
 
 ## Recommended Final Pre-Release QA
 

@@ -85,6 +85,7 @@ npm run tauri dev
 - `clear_perf_samples`
 - `update_config`
 - `list_models`
+- `get_readiness`
 - `download_model`
 - `delete_model`
 - `cancel_download`
@@ -100,8 +101,14 @@ npm run tauri dev
 - `SPIEL_PRE_PASTE_DELAY_MS` and `SPIEL_RESTORE_DELAY_MS` for paste timing.
 - `SPIEL_MODEL_DIR` for custom local model storage.
 - `SPIEL_ACCESSIBILITY_POLL_MS` to tune permission polling (default 1000ms, range 250–30000).
+- `SPIEL_PART_CLEANUP_MS` for stale `.part` file cleanup during startup/download (milliseconds, 0 keeps all, defaults to 24h).
 - `SPIEL_PROFILE` and `SPIEL_LATENCY_BUDGET_MS` for profiling behavior.
 - `SPIEL_DOWNLOAD_CONNECT_TIMEOUT_MS` and `SPIEL_DOWNLOAD_TIMEOUT_MS` for download robustness.
+
+## Non-macOS behavior
+
+- `playback/copy` auto-paste is macOS-only; non-macOS builds still provide clipboard fallback and clearly surface when explicit permission-based paste is unavailable.
+- Accessibility trust prompts and status are no-ops on non-macOS platforms.
 
 ## Performance and Memory
 
@@ -109,6 +116,7 @@ npm run tauri dev
 - In-callback downmix + downsample reduces worker copy volume.
 - Optional “keep model in RAM” controls let you trade startup latency for memory footprint.
 - Dictation duration is clamped to sane values (`5..600` seconds).
+- Readiness diagnostics report current model-store footprint to support disk/memory planning.
 
 ## Security & Privacy
 
