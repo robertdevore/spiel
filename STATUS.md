@@ -1,8 +1,8 @@
 # Spiel — Release Readiness Status
 
-Last updated: 2026-06-01
+Last updated: 2026-06-07
 Version: 0.2.0
-Branch: `rebuild/spiel-v2`
+Branch: `main`
 
 ## Release Summary
 
@@ -38,6 +38,7 @@ The app currently exposes 13 Tauri commands:
 - `download_model`
 - `cancel_download`
 - `delete_model`
+- `unload_model_from_memory`
 - `toggle_dictation`
 - `accessibility_status`
 - `request_accessibility`
@@ -70,6 +71,10 @@ Not fully verified in this headless environment:
 
 - Code signing and notarization are not configured in this repository.
 - Windows and Linux runtime validation is not part of this release scope.
+
+## Current Next-Session Backlog
+
+See: `docs/ENTERPRISE_READINESS_NEXT_SESSION.md`.
 
 ## Recommended Final Pre-Release QA
 

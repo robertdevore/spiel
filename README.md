@@ -1,38 +1,57 @@
 # Spiel
 
-Spiel is a local-first macOS push-to-talk dictation app built with Tauri + Rust.
-It is designed to be quiet, private, and immediately usable:
+Spiel is a local-first macOS dictation stack built with **Tauri + Rust** and backed by Whisper (`whisper-rs`) for offline transcription.
 
-- Press one global hotkey to start/stop recording.
-- Transcribe offline with whisper.cpp (`whisper-rs`).
-- Insert text where your cursor is via a trusted accessibility paste flow.
-- Fall back to clipboard paste if auto-paste is unavailable.
+It is designed to feel “quiet” in operation:
 
-The codebase is intentionally compact and optimized for reliability in long-running, real-world usage.
+- no background servers
+- no telemetry
+- no model traffic after setup
+- no raw audio persisted to disk
 
-## Why Spiel is Universal + Enterprise-Focused
+## What’s in the repo now
 
-- **Offline first by default**: no transcription traffic leaves your device.
-- **Multilingual models** are available directly in the model registry.
-- **Predictable settings path** and clear runtime state model reduce support burden.
-- **Memory controls** (thread count + keep-model-in-RAM toggles) allow trade-offs by deployment profile.
-- **Failure-safe startup and config writes** reduce startup-brick/recovery risks.
-- **Deterministic model downloads** with checksum/length checks and `.part` cleanup on failure.
-- **Permission-safe UX** for microphone and Accessibility.
+- `src/main.ts` — settings/status UI + model list/actions.
+- `src/styles.css` — minimal styling.
+- `src-tauri/src/` — Rust backend runtime: capture, transcription, downloads, insertion, and IPC.
+- `dist/` — generated frontend bundle from the latest build.
+- `docs/` — review notes and release-readiness tracking.
+- `BUG_HUNT_REPORT.md` and `STATUS.md` — prior findings and execution notes.
 
-## Architecture (2-minute view)
+This keeps source-of-truth in `src/` and `src-tauri/src/`, with only generated or reference artifacts at root.
 
-- **Frontend (`src/main.ts`)**: settings/status window and tray-oriented controls.
-- **Backend (`src-tauri/src/`)**: recording, model download, transcription, insertion, and state.
-- **No network in the transcription hot path**: model download is user-initiated, one-time, cached locally.
+## Core Experience
 
-## Requirements
+- Global hotkey toggle (`Cmd+Alt+D` by default).
+- Menu bar app with tray status and settings.
+- Start recording → transcribe → insert path in one worker thread.
+- Model-driven fallback messages for permission and startup issues.
+- Model list with install state (`installed`, `partial`, `corrupt`, `missing`, `unsafe_path`).
 
-- macOS 12+
-- Node.js 18+
-- Rust 1.80+
-- CMake (`brew install cmake`)
-- Xcode Command Line Tools
+## Universal/Enterprise Characteristics
+
+- **Offline-first**: transcription runs locally.
+- **Permission-safe**: microphone + Accessibility prompts are explicit and visible.
+- **Config hygiene**: configuration is normalized, validated, and safely saved through atomic temp-file writes.
+- **Model integrity checks**:
+  - GGML magic header
+  - size sanity checks
+  - optional SHA pin (when provided)
+  - safe path checks that reject symlink targets
+- **Operational controls** for resource policy:
+  - `keep_model_loaded` toggle
+  - thread count clamp
+  - recording duration clamp
+  - install cache + path checks
+
+## Supported Models
+
+Registry entries include English and multilingual families for pragmatic tradeoffs:
+
+- `tiny.en`, `base.en`, `small.en` (English-only)
+- `tiny`, `base`, `small`, `medium` (multilingual)
+
+Language hints are validated against the selected model family so unsupported combinations automatically degrade to safe defaults.
 
 ## Quick Start
 
@@ -41,88 +60,24 @@ npm install
 npm run tauri dev
 ```
 
-## First Run
+## Configuration Surface
 
-1. Start the app and open **Settings** from the tray icon.
-2. Choose a model (tiny/base/small) and download it.
-3. Grant **Microphone** permission when prompted.
-4. If using auto-paste, grant **Accessibility** when prompted.
-5. Press `Cmd+Alt+D` (or your custom hotkey).
+- `hotkey`
+- `model`
+- `language`
+- `auto_paste`
+- `restore_clipboard`
+- `keep_model_loaded`
+- `transcription_threads`
+- `max_seconds`
 
-## Core Settings
+### Language handling
 
-- **hotkey**
-- **model**
-  - `tiny.en`, `base.en`, `small.en` (English-only)
-  - `tiny`, `base`, `small`, `medium` (multilingual)
-- **language**
-  - `auto` (detect automatically)
-  - locale shorthand (`en`, `es`, `fr`, `de`, `pt`, `ru`, `ja`, `zh`, ...)
-- **auto_paste**
-- **restore_clipboard**
-- **keep_model_loaded**
-- **transcription_threads**
-- **max_seconds**
+- `auto` is always accepted.
+- BCP-47/legacy regional tags like `en-US` normalize to `en`.
+- Invalid values fall back to `auto` or model-safe defaults.
 
-`language` is validated against selected model semantics:
-
-- English-only model + non-English hint -> automatically falls back to `en`.
-- Multilingual model + invalid/unsupported hint -> falls back to `auto`.
-
-## Performance and Memory Profiles
-
-In the UI **Settings** panel you also get quick profiles:
-
-- **Low Memory**: `tiny.en`, 1 thread, unload model after each dictation
-- **Balanced**: `base.en`, 2 threads, unload model after each dictation
-- **Quality**: `small` (multilingual), 2 threads, unload model after each dictation
-- **Global**: `medium` (multilingual), 2 threads, unload model after each dictation
-
-You can also add/remove `keep_model_loaded` manually per session.
-
-### Useful memory tuning
-
-- Set `keep_model_loaded = false` to free model RAM after each run.
-- Reduce `transcription_threads` for lower peak memory/CPU pressure.
-- Prefer English-only models for memory-critical machines.
-
-## Performance Observability
-
-When `SPIEL_PROFILE=1`, additional runtime metrics are tracked and shown in the Settings panel.
-
-```bash
-SPIEL_PROFILE=1 npm run tauri dev
-```
-
-## Runtime Environment Controls
-
-- `SPIEL_WHISPER_THREADS` (`1..16`) overrides `transcription_threads` at runtime.
-- `SPIEL_PRE_PASTE_DELAY_MS` (default `60`) tuning delay before Cmd+V.
-- `SPIEL_RESTORE_DELAY_MS` (default `220`) tuning delay before clipboard restore.
-- `SPIEL_MODEL_DIR` to keep Whisper models in a custom directory.
-- `SPIEL_LATENCY_BUDGET_MS` (default `8000`) used by profile statistics.
-
-## Security & Privacy Notes
-
-- No accounts, no telemetry.
-- No audio is written to disk.
-- Raw audio exists only in memory during recording.
-- Model artifacts download into the app data directory and are validated before use.
-- Insertion failures and permission state are surfaced explicitly in the UI.
-
-## Build and verification
-
-```bash
-npm run build
-cd src-tauri
-cargo fmt --check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-## Command Surface
-
-Backend commands exposed to the UI:
+## Backend Commands Exposed to the UI
 
 - `get_status`
 - `get_config`
@@ -139,19 +94,47 @@ Backend commands exposed to the UI:
 - `request_accessibility`
 - `show_settings`
 
+## Runtime Environment Knobs
+
+- `SPIEL_WHISPER_THREADS` (`1..16`) to override model thread count.
+- `SPIEL_PRE_PASTE_DELAY_MS` and `SPIEL_RESTORE_DELAY_MS` for paste timing.
+- `SPIEL_MODEL_DIR` for custom local model storage.
+- `SPIEL_ACCESSIBILITY_POLL_MS` to tune permission polling (default 1000ms, range 250–30000).
+- `SPIEL_PROFILE` and `SPIEL_LATENCY_BUDGET_MS` for profiling behavior.
+- `SPIEL_DOWNLOAD_CONNECT_TIMEOUT_MS` and `SPIEL_DOWNLOAD_TIMEOUT_MS` for download robustness.
+
+## Performance and Memory
+
+- Capture buffer is bounded by target sample rate (`16 kHz`) and recording window.
+- In-callback downmix + downsample reduces worker copy volume.
+- Optional “keep model in RAM” controls let you trade startup latency for memory footprint.
+- Dictation duration is clamped to sane values (`5..600` seconds).
+
+## Security & Privacy
+
+- No audio files are written by normal operation.
+- Only model files are written during explicit model download.
+- Clipboard insertion never assumes Accessibility trust; it falls back to manual paste if needed.
+- Model paths reject symlinks and parent directory traversal.
+- Download and settings writes are bounded with validation and cleanup on error.
+
+## Verification
+
+```bash
+npm run build
+cd src-tauri
+cargo fmt --check
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
 ## Troubleshooting
 
-- **Hotkey does nothing**
-  - Another app may already use the shortcut; change it in Settings.
-- **Text does not auto-paste**
-  - Accessibility must be trusted. Grant permission and retry.
-- **Model download stalls/aborts**
-  - Check network connectivity and storage space.
-- **Unexpected model load failures**
-  - Remove the failed `.part` file and retry download from Settings.
+- **I can’t start with hotkey**: likely key conflict; set another sequence in settings.
+- **Model install says partial/corrupt**: delete and repair from model list, then re-download.
+- **Auto-paste does nothing**: Accessibility must be trusted.
+- **Transcription is slow**: switch to multilingual `small`/`base` trade-off, or lower threads/disable `keep_model_loaded` for memory.
 
-## Release Notes / Reviews
+## Roadmap
 
-- `docs/REVIEW-2026-05-30-opus48.md` contains the historical review.
-- `BUG_HUNT_REPORT.md` contains prior bug-fix evidence and prior check-ins.
-- `docs/RELEASE_READINESS_NEXT_SESSION.md` tracks the current deep-dive action list and remaining work.
+The next engineering pass is tracked in `docs/RELEASE_READINESS_NEXT_SESSION.md`.
