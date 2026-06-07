@@ -14,6 +14,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
 /// GGML container magic. whisper.cpp writes the u32 `0x67676d6c` ("ggml"), which lands on
 /// disk little-endian as the bytes `6c 6d 67 67`. We compare as a LE u32 to stay correct.
@@ -29,11 +30,12 @@ pub struct ModelSpec {
     pub approx_mb: u32,
     /// Pinned SHA-256 (hex). Empty = not pinned; we still validate magic + size.
     pub sha256: &'static str,
+    /// True for multilingual checkpoints; false means English-only variants.
+    pub multilingual: bool,
     pub note: &'static str,
 }
 
-/// Models offered in the UI. `base.en` is the default: a good accuracy/speed balance
-/// for English dictation on Apple Silicon.
+/// Models offered in the UI.
 pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         id: "tiny.en",
@@ -42,6 +44,7 @@ pub const REGISTRY: &[ModelSpec] = &[
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
         approx_mb: 75,
         sha256: "",
+        multilingual: false,
         note: "Fastest, lowest accuracy. Good on older Macs.",
     },
     ModelSpec {
@@ -51,6 +54,7 @@ pub const REGISTRY: &[ModelSpec] = &[
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
         approx_mb: 142,
         sha256: "",
+        multilingual: false,
         note: "Recommended. Balanced speed and accuracy for English.",
     },
     ModelSpec {
@@ -60,7 +64,48 @@ pub const REGISTRY: &[ModelSpec] = &[
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
         approx_mb: 466,
         sha256: "",
+        multilingual: false,
         note: "Higher accuracy, slower. Best on Apple Silicon.",
+    },
+    ModelSpec {
+        id: "tiny",
+        label: "Tiny (Multilingual)",
+        filename: "ggml-tiny.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        approx_mb: 75,
+        sha256: "",
+        multilingual: true,
+        note: "Tiny-size multilingual model. Great for mixed-language notes.",
+    },
+    ModelSpec {
+        id: "base",
+        label: "Base (Multilingual)",
+        filename: "ggml-base.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        approx_mb: 142,
+        sha256: "",
+        multilingual: true,
+        note: "English and multilingual default quality profile.",
+    },
+    ModelSpec {
+        id: "small",
+        label: "Small (Multilingual)",
+        filename: "ggml-small.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        approx_mb: 466,
+        sha256: "",
+        multilingual: true,
+        note: "Higher-quality multilingual model. Better for mixed-language output.",
+    },
+    ModelSpec {
+        id: "medium",
+        label: "Medium (Multilingual)",
+        filename: "ggml-medium.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        approx_mb: 1536,
+        sha256: "",
+        multilingual: true,
+        note: "Largest included quality target. Better recall/accuracy, more memory.",
     },
 ];
 
@@ -68,11 +113,56 @@ pub fn spec(id: &str) -> Option<&'static ModelSpec> {
     REGISTRY.iter().find(|m| m.id == id)
 }
 
+pub fn is_language_supported(spec: &ModelSpec, language: &str) -> bool {
+    if language == "auto" {
+        return true;
+    }
+    if !is_language_hint(language) {
+        return false;
+    }
+    if spec.multilingual {
+        true
+    } else {
+        language == "en"
+    }
+}
+
+pub fn is_language_hint(language: &str) -> bool {
+    if language == "en" || language == "auto" {
+        return true;
+    }
+    let primary = language.split(['-', '_']).next().unwrap_or("");
+    let is_primary_valid = primary.len() == 2 && primary.bytes().all(|b| b.is_ascii_lowercase());
+    if !is_primary_valid {
+        return false;
+    }
+    language
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+pub fn normalize_language_hint(language: &str) -> String {
+    let raw = language.trim().to_ascii_lowercase();
+    if raw.is_empty() {
+        return "auto".into();
+    }
+    if raw == "auto" {
+        return "auto".into();
+    }
+
+    let primary = raw.split(['-', '_']).next().unwrap_or("");
+    if is_language_hint(primary) {
+        primary.to_string()
+    } else {
+        "auto".into()
+    }
+}
+
 /// Is the model for `id` present and structurally valid on disk?
 pub fn is_installed(model_dir: &Path, id: &str) -> bool {
     let Some(spec) = spec(id) else { return false };
     let path = model_dir.join(spec.filename);
-    validate_file(&path, spec).is_ok()
+    is_safe_model_path(&path, "model").is_ok() && validate_file(&path, spec).is_ok()
 }
 
 /// Download `spec` to `model_dir`, calling `on_progress(downloaded, total)` as it goes.
@@ -88,11 +178,24 @@ pub fn download(
     std::fs::create_dir_all(model_dir)
         .map_err(|e| SpielError::Download(format!("cannot create model dir: {e}")))?;
 
+    let (connect_timeout, request_timeout) = (
+        load_download_timeout_ms("SPIEL_DOWNLOAD_CONNECT_TIMEOUT_MS", 10_000),
+        load_download_timeout_ms("SPIEL_DOWNLOAD_TIMEOUT_MS", 30 * 60 * 1_000),
+    );
+
     let final_path = model_dir.join(spec.filename);
     let part_path = model_dir.join(format!("{}.part", spec.filename));
 
+    is_safe_model_path(&part_path, "temporary model file")
+        .and_then(|_| is_safe_model_path(&final_path, "target model file"))?;
+
+    if part_path.exists() {
+        let _ = std::fs::remove_file(&part_path);
+    }
+
     let client = reqwest::blocking::Client::builder()
-        .timeout(None) // large file; rely on cancellation instead
+        .connect_timeout(Duration::from_millis(connect_timeout))
+        .timeout(Duration::from_millis(request_timeout))
         .build()
         .map_err(|e| SpielError::Download(e.to_string()))?;
 
@@ -117,7 +220,8 @@ pub fn download(
     let mut buf = [0u8; 64 * 1024];
 
     on_progress(0, total);
-    loop {
+    let mut download_result = Ok(());
+    while download_result.is_ok() {
         if should_cancel() {
             drop(file);
             let _ = std::fs::remove_file(&part_path);
@@ -130,11 +234,19 @@ pub fn download(
             break;
         }
         use std::io::Write;
-        file.write_all(&buf[..n])
-            .map_err(|e| SpielError::Download(format!("write error: {e}")))?;
+        download_result = file
+            .write_all(&buf[..n])
+            .map_err(|e| SpielError::Download(format!("write error: {e}")));
+        if download_result.is_err() {
+            break;
+        }
         hasher.update(&buf[..n]);
         downloaded += n as u64;
         on_progress(downloaded, total);
+    }
+    if let Err(e) = download_result {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(e);
     }
     file.sync_all().ok();
     drop(file);
@@ -210,6 +322,35 @@ fn ensure_complete_download(total: Option<u64>, downloaded: u64) -> Result<()> {
     Ok(())
 }
 
+fn is_safe_model_path(path: &Path, label: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(SpielError::Download(format!(
+                    "{label} path is a symlink; refusing overwrite"
+                )));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(SpielError::Download(format!(
+                "cannot check {label} path {path:?}: {e}"
+            )))
+        }
+    }
+    Ok(())
+}
+
+fn load_download_timeout_ms(name: &str, default_ms: u64) -> u64 {
+    parse_download_timeout_ms(std::env::var(name).ok().as_deref(), default_ms)
+}
+
+fn parse_download_timeout_ms(raw: Option<&str>, default_ms: u64) -> u64 {
+    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(1_000, 86_400_000))
+        .unwrap_or(default_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,8 +361,82 @@ mod tests {
     }
 
     #[test]
+    fn multilingual_registry_entries_exist() {
+        assert!(spec("tiny").is_some());
+        assert!(spec("base").is_some());
+        assert!(spec("small").is_some());
+    }
+
+    #[test]
     fn unknown_model_is_none() {
         assert!(spec("nope").is_none());
+    }
+
+    #[test]
+    fn language_hint_validation_prefers_sane_tags() {
+        assert!(is_language_hint("en"));
+        assert!(is_language_hint("auto"));
+        assert!(is_language_hint("zh"));
+        assert!(is_language_hint("en-US"));
+        assert!(is_language_hint("pt_BR"));
+        assert!(!is_language_hint("e"));
+        assert!(!is_language_hint("eng"));
+        assert!(!is_language_hint("en us"));
+        assert!(!is_language_hint("zzzz"));
+    }
+
+    #[test]
+    fn english_model_rejects_non_english_hint() {
+        let tiny_en = spec("tiny.en").expect("tiny.en exists");
+        assert!(is_language_supported(tiny_en, "en"));
+        assert!(is_language_supported(tiny_en, "auto"));
+        assert!(!is_language_supported(tiny_en, "es"));
+        assert!(!is_language_supported(tiny_en, "fr"));
+    }
+
+    #[test]
+    fn multilingual_model_accepts_extended_hint() {
+        let tiny = spec("tiny").expect("tiny exists");
+        assert!(is_language_supported(tiny, "es"));
+        assert!(is_language_supported(tiny, "zh"));
+        assert!(!is_language_supported(tiny, "e"));
+    }
+
+    #[test]
+    fn normalizes_region_and_invalid_language_tags() {
+        assert_eq!(normalize_language_hint(" en-US "), "en");
+        assert_eq!(normalize_language_hint("fr_CA"), "fr");
+        assert_eq!(normalize_language_hint(""), "auto");
+        assert_eq!(normalize_language_hint("zzZZ"), "auto");
+    }
+
+    #[test]
+    fn download_timeouts_have_sane_defaults() {
+        assert_eq!(load_download_timeout_ms("SPIEL_NOT_SET", 10_000), 10_000);
+    }
+
+    #[test]
+    fn download_timeouts_respect_bounds() {
+        assert_eq!(parse_download_timeout_ms(Some("500"), 10_000), 1000);
+        assert_eq!(parse_download_timeout_ms(Some("1200000"), 10_000), 1200000);
+        assert_eq!(
+            parse_download_timeout_ms(Some("99999999"), 10_000),
+            86_400_000
+        );
+        assert_eq!(parse_download_timeout_ms(None, 10_000), 10_000);
+    }
+
+    #[test]
+    fn safe_model_path_rejects_symlink_or_errors() {
+        let temp = std::env::temp_dir().join(format!(
+            "spiel_model_safe_path_check_{}",
+            std::process::id()
+        ));
+        if temp.exists() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        assert!(is_safe_model_path(&temp, "test").is_ok());
+        let _ = std::fs::remove_file(&temp);
     }
 
     #[test]

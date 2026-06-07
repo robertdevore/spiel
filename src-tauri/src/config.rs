@@ -67,14 +67,14 @@ impl Config {
             self.model = Config::default().model;
         }
 
-        let language = self.language.trim().to_ascii_lowercase();
-        if language.is_empty() {
-            self.language = "auto".into();
-        } else if language == "en" || language == "auto" {
-            self.language = language;
+        let language = crate::model::normalize_language_hint(&self.language);
+        let model_spec = crate::model::spec(&self.model)
+            .or_else(|| crate::model::spec("tiny.en"))
+            .unwrap();
+        if !crate::model::is_language_supported(model_spec, &language) {
+            self.language = "en".into();
         } else {
-            // Unknown hints should not break transcription; let Whisper auto-detect.
-            self.language = "auto".into();
+            self.language = language;
         }
 
         // Keep recordings sane: 5s..=600s.
@@ -107,9 +107,31 @@ impl Config {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| SpielError::Config(format!("Failed to serialize settings: {e}")))?;
-        std::fs::write(path, json)
-            .map_err(|e| SpielError::Config(format!("Failed to write settings: {e}")))
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)
+            .map_err(|e| SpielError::Config(format!("Failed to write temp settings: {e}")))?;
+        #[cfg(windows)]
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            SpielError::Config(format!("Failed to finalize settings: {e}"))
+        })?;
+        set_config_permissions(path)?;
+        Ok(())
     }
+}
+
+fn set_config_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, mode)
+            .map_err(|e| SpielError::Config(format!("Failed to set config permissions: {e}")))?;
+    }
+    Ok(())
 }
 
 /// Resolved on-disk locations. Computed once at startup from Tauri's path resolver.
@@ -143,7 +165,7 @@ mod tests {
     #[test]
     fn language_normalizes_and_falls_back_to_auto() {
         let cfg = Config {
-            language: " EN ".into(),
+            language: " en-US ".into(),
             ..Config::default()
         }
         .validated()
@@ -151,12 +173,36 @@ mod tests {
         assert_eq!(cfg.language, "en");
 
         let cfg2 = Config {
-            language: "spanish".into(),
+            language: "zz-99".into(),
             ..Config::default()
         }
         .validated()
         .unwrap();
-        assert_eq!(cfg2.language, "auto");
+        assert_eq!(cfg2.language, "en");
+    }
+
+    #[test]
+    fn english_only_models_force_english_language() {
+        let cfg = Config {
+            model: "tiny.en".into(),
+            language: "es".into(),
+            ..Config::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(cfg.language, "en");
+    }
+
+    #[test]
+    fn multilingual_models_allow_supported_language_hints() {
+        let cfg = Config {
+            model: "base".into(),
+            language: "es-MX".into(),
+            ..Config::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(cfg.language, "es");
     }
 
     #[test]

@@ -146,7 +146,7 @@ impl AppState {
         StatusSnapshot {
             phase: status.phase,
             message: status.message.clone(),
-            needs_accessibility: status.needs_accessibility,
+            needs_accessibility: status.needs_accessibility && !crate::accessibility::is_trusted(),
             recording_elapsed_ms: elapsed,
             model_id: config.model.clone(),
             model_installed: crate::model::is_installed(&self.paths.model_dir, &config.model),
