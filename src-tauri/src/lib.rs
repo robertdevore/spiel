@@ -33,9 +33,13 @@ pub fn run() {
             // Resolve on-disk locations and load (or create) settings.
             let config_dir = handle.path().app_config_dir()?;
             let data_dir = handle.path().app_data_dir()?;
+            let model_dir = std::env::var_os("SPIEL_MODEL_DIR")
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| data_dir.join("models"));
             let paths = Paths {
                 config_file: config_dir.join("config.json"),
-                model_dir: data_dir.join("models"),
+                model_dir,
             };
             let config = match Config::load(&paths.config_file) {
                 Ok(cfg) => cfg,
@@ -83,6 +87,7 @@ pub fn run() {
             commands::update_config,
             commands::list_models,
             commands::download_model,
+            commands::delete_model,
             commands::cancel_download,
             commands::toggle_dictation,
             commands::unload_model_from_memory,

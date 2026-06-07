@@ -226,6 +226,42 @@ pub fn download_model(
 }
 
 #[tauri::command]
+pub fn delete_model(state: State<AppState>, model_id: String) -> Result<(), String> {
+    let Some(spec) = model::spec(&model_id) else {
+        return Err(format!("Unknown model '{model_id}'."));
+    };
+
+    {
+        let dl = state.download.lock().unwrap();
+        if dl.active && dl.model_id.as_deref() == Some(model_id.as_str()) {
+            return Err("Cannot delete a model while it is downloading.".into());
+        }
+    }
+
+    let model_path = state.paths.model_path(spec.filename);
+    if !model_path.exists() {
+        return Err(format!("Model '{model_id}' is not installed."));
+    }
+
+    let current_model = state.config.lock().unwrap().model.clone();
+    if current_model == model_id {
+        return Err("Cannot delete the active model directly. Switch models first.".into());
+    }
+
+    std::fs::remove_file(&model_path).map_err(|e| format!("Failed to remove '{model_id}': {e}"))?;
+
+    let part_path = state
+        .paths
+        .model_dir
+        .join(format!("{}.part", spec.filename));
+    let _ = std::fs::remove_file(part_path);
+
+    let mut transcriber = state.transcriber.lock().unwrap();
+    *transcriber = None;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn cancel_download(state: State<AppState>) {
     let dl = state.download.lock().unwrap();
     dl.cancel.store(true, Ordering::Relaxed);

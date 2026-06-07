@@ -63,6 +63,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 button.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #06122b; font-weight: 700; }
 button.primary:hover { background: var(--accent); }
 button.recording { background: var(--danger); border-color: var(--danger); color: #2b0808; font-weight: 700; }
+button.danger { background: rgba(255, 107, 107, 0.12); border-color: #7e2d2d; color: #ffb5b5; }
+button.danger:hover { background: rgba(255, 107, 107, 0.2); }
 
 .big-btn { font-size: 15px; padding: 12px; }
 

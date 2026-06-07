@@ -83,6 +83,11 @@ interface PerfEvent {
   outcome: string;
 }
 
+interface LanguageOption {
+  value: string;
+  label: string;
+}
+
 // ── Module state ────────────────────────────────────────────────────────────
 let status: StatusSnapshot | null = null;
 let config: Config | null = null;
@@ -108,24 +113,43 @@ const PHASE_LABEL: Record<Phase, string> = {
   error: "Error",
 };
 
+const LANGUAGE_OPTIONS: LanguageOption[] = [
+  { value: "auto", label: "Auto-detect" },
+  { value: "en", label: "English" },
+  { value: "es", label: "Spanish" },
+  { value: "fr", label: "French" },
+  { value: "de", label: "German" },
+  { value: "it", label: "Italian" },
+  { value: "pt", label: "Portuguese" },
+  { value: "ru", label: "Russian" },
+  { value: "ja", label: "Japanese" },
+  { value: "zh", label: "Chinese" },
+];
+
 const MEMORY_PROFILES: MemoryProfile[] = [
   {
     id: "low",
     label: "Low Memory",
-    summary: "Tiny model, unload after each run, 1 thread.",
+    summary: "Tiny English model, unload after each run, 1 thread.",
     patch: { model: "tiny.en", keep_model_loaded: false, transcription_threads: 1 },
   },
   {
     id: "balanced",
     label: "Balanced",
-    summary: "Base model, unload after each run, 2 threads.",
+    summary: "Base English model, unload after each run, 2 threads.",
     patch: { model: "base.en", keep_model_loaded: false, transcription_threads: 2 },
   },
   {
     id: "quality",
     label: "Quality",
-    summary: "Small model, unload after each run, 2 threads.",
-    patch: { model: "small.en", keep_model_loaded: false, transcription_threads: 2 },
+    summary: "Small multilingual model, unload after each run, 2 threads.",
+    patch: { model: "small", keep_model_loaded: false, transcription_threads: 2 },
+  },
+  {
+    id: "global",
+    label: "Global",
+    summary: "Medium multilingual model, unload after each run, 2 threads.",
+    patch: { model: "medium", keep_model_loaded: false, transcription_threads: 2 },
   },
 ];
 
@@ -391,6 +415,18 @@ function modelsCard(): HTMLElement {
         useBtn.textContent = "Use";
         useBtn.onclick = () => saveConfig({ model: m.id });
         row.appendChild(useBtn);
+
+        const deleteBtn = document.createElement("button");
+        deleteBtn.className = "danger";
+        deleteBtn.textContent = "Delete";
+        deleteBtn.onclick = () => {
+          if (confirm(`Delete model ${m.label}? This frees disk and unloads any cache.`)) {
+            invoke("delete_model", { modelId: m.id }).catch((e) => {
+              setError(`Could not delete model: ${e}`);
+            }).finally(refreshModelsOnly);
+          }
+        };
+        row.appendChild(deleteBtn);
       }
     } else {
       const dlBtn = document.createElement("button");
@@ -428,20 +464,37 @@ function settingsCard(c: Config): HTMLElement {
 
   const langWrap = document.createElement("label");
   langWrap.className = "field";
-  langWrap.innerHTML = `Language`;
-  const langSel = document.createElement("select");
-  for (const [val, label] of [
-    ["en", "English"],
-    ["auto", "Auto-detect"],
-  ]) {
+  langWrap.textContent = "Language";
+  const langInputWrap = document.createElement("div");
+  langInputWrap.className = "row";
+  const langInput = document.createElement("input");
+  langInput.type = "text";
+  langInput.value = c.language;
+  langInput.placeholder = "en or auto";
+  langInput.setAttribute("list", "language-options");
+  langInput.onblur = () => {
+    const normalized = normalizeLanguage(langInput.value);
+    langInput.value = normalized;
+    if (normalized !== c.language) {
+      saveConfig({ language: normalized });
+    }
+  };
+  langInput.onkeydown = (event) => {
+    if (event.key === "Enter") {
+      langInput.blur();
+    }
+  };
+  const languageList = document.createElement("datalist");
+  languageList.id = "language-options";
+  for (const option of LANGUAGE_OPTIONS) {
     const opt = document.createElement("option");
-    opt.value = val;
-    opt.textContent = label;
-    if (c.language === val) opt.selected = true;
-    langSel.appendChild(opt);
+    opt.value = option.value;
+    opt.label = option.label;
+    languageList.appendChild(opt);
   }
-  langSel.onchange = () => saveConfig({ language: langSel.value });
-  langWrap.appendChild(langSel);
+  langInputWrap.appendChild(langInput);
+  langInputWrap.appendChild(languageList);
+  langWrap.appendChild(langInputWrap);
   card.appendChild(langWrap);
 
   card.appendChild(
@@ -616,6 +669,18 @@ function escapeHtml(s: string): string {
   const div = document.createElement("div");
   div.textContent = s;
   return div.innerHTML;
+}
+
+function normalizeLanguage(raw: string): string {
+  const value = raw.trim().toLowerCase();
+  if (!value) {
+    return "auto";
+  }
+  if (value === "auto") {
+    return "auto";
+  }
+  const [primary] = value.split(/[-_]/);
+  return /^[a-z]{2}$/.test(primary) ? primary : "auto";
 }
 
 // ── Wire up events ──────────────────────────────────────────────────────────
