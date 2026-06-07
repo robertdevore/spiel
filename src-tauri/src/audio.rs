@@ -1,7 +1,7 @@
 //! Microphone capture.
 //!
 //! Captures from the default input device, downmixes to mono, and resamples to the
-//! 16 kHz f32 PCM that Whisper expects — all in memory. **No WAV files are ever
+//! 16 kHz PCM that Whisper expects — all in memory. **No WAV files are ever
 //! written to disk**, which removes the "raw audio lingers in /tmp" privacy problem
 //! the previous build had.
 //!
@@ -18,7 +18,7 @@ use std::time::Instant;
 /// Sample rate Whisper models are trained on.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
-/// A finished capture: mono 16 kHz f32 samples, ready for Whisper.
+/// A finished capture: mono 16 kHz f32 PCM, ready for Whisper.
 pub struct Capture {
     pub samples: Vec<f32>,
 }
@@ -55,7 +55,7 @@ impl Recorder {
         *self.elapsed_ms.lock().unwrap()
     }
 
-    /// Stop recording and return resampled mono 16 kHz samples. Consumes the recorder.
+    /// Stop recording and return mono 16 kHz samples. Consumes the recorder.
     pub fn finish(self) -> Result<Capture> {
         let _ = self.stop_tx.send(());
         let raw = self
@@ -63,10 +63,20 @@ impl Recorder {
             .recv_timeout(std::time::Duration::from_secs(3))
             .map_err(|_| SpielError::Audio("recording thread did not return in time".into()))?;
 
-        let samples = resample_linear(&raw, self.in_rate, TARGET_SAMPLE_RATE);
+        let samples = if self.in_rate == TARGET_SAMPLE_RATE {
+            raw
+        } else {
+            resample_linear(&raw, self.in_rate, TARGET_SAMPLE_RATE)
+        };
 
         Ok(Capture { samples })
     }
+}
+
+#[derive(Default)]
+struct DownsampleState {
+    frame_position: u64,
+    next_output_frame: f64,
 }
 
 /// Begin capturing from the default input device.
@@ -90,9 +100,19 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
     let elapsed_ms = Arc::new(Mutex::new(0u64));
     let elapsed_clone = Arc::clone(&elapsed_ms);
 
-    // Cap interleaved samples so a forgotten recording can't grow without bound.
-    // Record downmixed mono samples internally; cap by per-frame sample count.
-    let max_samples = (in_rate as usize) * (max_seconds as usize);
+    // Whisper consumes 16 kHz; cap by target sample frames so memory is bounded by model
+    // input characteristics rather than device input rate.
+    let max_samples = (TARGET_SAMPLE_RATE as usize) * (max_seconds as usize);
+    let need_downsample = in_rate > TARGET_SAMPLE_RATE;
+    let downsample_ratio = if need_downsample {
+        Some(in_rate as f64 / TARGET_SAMPLE_RATE as f64)
+    } else {
+        None
+    };
+    let downsample_state = need_downsample.then_some(Arc::new(Mutex::new(DownsampleState {
+        frame_position: 0,
+        next_output_frame: 0.0,
+    })));
 
     std::thread::spawn(move || {
         let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(max_samples)));
@@ -105,9 +125,13 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
             &device,
             &config,
             sample_format,
-            cb_buffer,
-            max_samples,
-            in_channels,
+            StreamBuildContext {
+                buffer: cb_buffer,
+                max_samples,
+                channels: in_channels,
+                downsample_state,
+                downsample_ratio,
+            },
             err_fn,
         ) {
             Ok(s) => s,
@@ -157,15 +181,16 @@ fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     format: SampleFormat,
-    buffer: Arc<Mutex<Vec<f32>>>,
-    max_samples: usize,
-    channels: u16,
+    context: StreamBuildContext,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
     macro_rules! input {
         ($t:ty, $to_f32:expr) => {{
-            let buffer = Arc::clone(&buffer);
-            let channels = channels;
+            let buffer = Arc::clone(&context.buffer);
+            let max_samples = context.max_samples;
+            let channels = context.channels;
+            let downsample_state = context.downsample_state.clone();
+            let downsample_ratio = context.downsample_ratio;
             device.build_input_stream(
                 config,
                 move |data: &[$t], _: &cpal::InputCallbackInfo| {
@@ -174,16 +199,67 @@ fn build_stream(
                         return;
                     }
                     let remaining = max_samples - buf.len();
-                    if channels <= 1 {
-                        buf.extend(data.iter().take(remaining).map(|&s| ($to_f32)(s)));
-                        return;
-                    }
 
-                    let frame_count =
-                        (data.len() / (channels as usize)).min(remaining / (channels as usize));
-                    for frame in data.chunks_exact(channels as usize).take(frame_count) {
-                        let frame_sum: f32 = frame.iter().map(|&s| ($to_f32)(s)).sum();
-                        buf.push(frame_sum / frame.len() as f32);
+                    if let Some(ratio) = downsample_ratio {
+                        if let Some(state) = downsample_state.as_ref() {
+                            let mut state = state.lock().unwrap();
+                            if channels <= 1 {
+                                for &raw in data.iter().take(remaining) {
+                                    if (state.frame_position as f64) >= state.next_output_frame {
+                                        buf.push(($to_f32)(raw));
+                                        state.next_output_frame += ratio;
+                                        if buf.len() >= max_samples {
+                                            break;
+                                        }
+                                    }
+                                    state.frame_position = state.frame_position.saturating_add(1);
+                                }
+                            } else {
+                                for frame in data
+                                    .chunks_exact(channels as usize)
+                                    .take(remaining / channels as usize)
+                                {
+                                    let frame_sum: f32 = frame.iter().map(|&s| ($to_f32)(s)).sum();
+                                    let sample = frame_sum / frame.len() as f32;
+                                    if (state.frame_position as f64) >= state.next_output_frame {
+                                        buf.push(sample);
+                                        state.next_output_frame += ratio;
+                                        if buf.len() >= max_samples {
+                                            break;
+                                        }
+                                    }
+                                    state.frame_position = state.frame_position.saturating_add(1);
+                                }
+                            }
+                        } else {
+                            if channels <= 1 {
+                                buf.extend(data.iter().take(remaining).map(|&raw| ($to_f32)(raw)));
+                            } else {
+                                buf.extend(
+                                    data.chunks_exact(channels as usize)
+                                        .take(remaining / channels as usize)
+                                        .map(|frame| {
+                                            let frame_sum: f32 =
+                                                frame.iter().map(|&s| ($to_f32)(s)).sum();
+                                            frame_sum / frame.len() as f32
+                                        }),
+                                );
+                            }
+                        }
+                    } else {
+                        if channels <= 1 {
+                            buf.extend(data.iter().take(remaining).map(|&raw| ($to_f32)(raw)));
+                        } else {
+                            buf.extend(
+                                data.chunks_exact(channels as usize)
+                                    .take(remaining / channels as usize)
+                                    .map(|frame| {
+                                        let frame_sum: f32 =
+                                            frame.iter().map(|&s| ($to_f32)(s)).sum();
+                                        frame_sum / frame.len() as f32
+                                    }),
+                            );
+                        }
                     }
                     // Ignore partial frames; this prevents uneven-channel artifacts while
                     // the callback naturally delivers nearly exact frame boundaries.
@@ -203,6 +279,14 @@ fn build_stream(
             input!(f32, |s: f32| s)
         }
     }
+}
+
+struct StreamBuildContext {
+    buffer: Arc<Mutex<Vec<f32>>>,
+    max_samples: usize,
+    channels: u16,
+    downsample_state: Option<Arc<Mutex<DownsampleState>>>,
+    downsample_ratio: Option<f64>,
 }
 
 /// Resample mono audio to `out_rate`. Downsampling averages each source window, which
