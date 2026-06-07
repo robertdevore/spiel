@@ -40,7 +40,6 @@ pub struct Recorder {
     stop_tx: mpsc::Sender<()>,
     result_rx: mpsc::Receiver<Vec<f32>>,
     in_rate: u32,
-    in_channels: u16,
     /// Captured live so the UI can show an elapsed timer.
     elapsed_ms: Arc<Mutex<u64>>,
 }
@@ -64,8 +63,7 @@ impl Recorder {
             .recv_timeout(std::time::Duration::from_secs(3))
             .map_err(|_| SpielError::Audio("recording thread did not return in time".into()))?;
 
-        let mono = downmix_to_mono(&raw, self.in_channels);
-        let samples = resample_linear(&mono, self.in_rate, TARGET_SAMPLE_RATE);
+        let samples = resample_linear(&raw, self.in_rate, TARGET_SAMPLE_RATE);
 
         Ok(Capture { samples })
     }
@@ -93,10 +91,11 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
     let elapsed_clone = Arc::clone(&elapsed_ms);
 
     // Cap interleaved samples so a forgotten recording can't grow without bound.
-    let max_samples = (in_rate as usize) * (in_channels as usize) * (max_seconds as usize);
+    // Record downmixed mono samples internally; cap by per-frame sample count.
+    let max_samples = (in_rate as usize) * (max_seconds as usize);
 
     std::thread::spawn(move || {
-        let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(max_samples)));
         let cb_buffer = Arc::clone(&buffer);
 
         let err_fn = |e| eprintln!("[spiel] audio stream error: {e}");
@@ -108,6 +107,7 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
             sample_format,
             cb_buffer,
             max_samples,
+            in_channels,
             err_fn,
         ) {
             Ok(s) => s,
@@ -149,7 +149,6 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
         stop_tx,
         result_rx,
         in_rate,
-        in_channels,
         elapsed_ms,
     })
 }
@@ -160,11 +159,13 @@ fn build_stream(
     format: SampleFormat,
     buffer: Arc<Mutex<Vec<f32>>>,
     max_samples: usize,
+    channels: u16,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
     macro_rules! input {
         ($t:ty, $to_f32:expr) => {{
             let buffer = Arc::clone(&buffer);
+            let channels = channels;
             device.build_input_stream(
                 config,
                 move |data: &[$t], _: &cpal::InputCallbackInfo| {
@@ -173,7 +174,19 @@ fn build_stream(
                         return;
                     }
                     let remaining = max_samples - buf.len();
-                    buf.extend(data.iter().take(remaining).map(|&s| ($to_f32)(s)));
+                    if channels <= 1 {
+                        buf.extend(data.iter().take(remaining).map(|&s| ($to_f32)(s)));
+                        return;
+                    }
+
+                    let frame_count =
+                        (data.len() / (channels as usize)).min(remaining / (channels as usize));
+                    for frame in data.chunks_exact(channels as usize).take(frame_count) {
+                        let frame_sum: f32 = frame.iter().map(|&s| ($to_f32)(s)).sum();
+                        buf.push(frame_sum / frame.len() as f32);
+                    }
+                    // Ignore partial frames; this prevents uneven-channel artifacts while
+                    // the callback naturally delivers nearly exact frame boundaries.
                 },
                 err_fn,
                 None,
@@ -190,18 +203,6 @@ fn build_stream(
             input!(f32, |s: f32| s)
         }
     }
-}
-
-/// Average interleaved channels down to mono.
-fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
-    if channels <= 1 {
-        return interleaved.to_vec();
-    }
-    let ch = channels as usize;
-    interleaved
-        .chunks(ch)
-        .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
-        .collect()
 }
 
 /// Resample mono audio to `out_rate`. Downsampling averages each source window, which
@@ -231,13 +232,24 @@ mod tests {
     #[test]
     fn downmix_averages_stereo() {
         let stereo = [1.0, 0.0, 0.5, 0.5];
-        assert_eq!(downmix_to_mono(&stereo, 2), vec![0.5, 0.5]);
+        assert_eq!(test_downmix_to_mono(&stereo, 2), vec![0.5, 0.5]);
     }
 
     #[test]
     fn downmix_passthrough_mono() {
         let mono = [0.1, 0.2, 0.3];
-        assert_eq!(downmix_to_mono(&mono, 1), vec![0.1, 0.2, 0.3]);
+        assert_eq!(test_downmix_to_mono(&mono, 1), vec![0.1, 0.2, 0.3]);
+    }
+
+    fn test_downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
+        if channels <= 1 {
+            return interleaved.to_vec();
+        }
+        let ch = channels as usize;
+        interleaved
+            .chunks(ch)
+            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+            .collect()
     }
 
     #[test]
