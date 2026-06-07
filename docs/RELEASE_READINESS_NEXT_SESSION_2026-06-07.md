@@ -17,48 +17,37 @@
 
 ## Release Readiness Status
 
-Spiel is materially stronger for enterprise deployment, but we still have room before “shining star” status:
+Spiel now has substantially stronger release scaffolding:
 
-- We now have better integrity posture, retry resilience, and observability.
-- We still need explicit multilingual model quality guidance, performance guardrails, and stronger lifecycle UX around permission state and failures.
+- startup health can be fetched and emitted as an event
+- model recommendations are language-aware
+- warm-up can be triggered manually or on startup
+- remote checksum provenance can come from a manifest or detached sidecar
+- perf telemetry includes stage/actionability metrics and clipboard/download outcomes
+- stale artifact cleanup now runs at startup and on a maintenance interval
+- setup guidance is surfaced directly in the UI instead of being hidden in docs
 
-## Next Session Checklist
+## Checklist Completion
 
-1. Add startup integrity self-check event
-   - Expose a one-command health probe for model artifacts + runtime readiness and return a machine-consumable summary payload.
+1. Startup integrity self-check event: completed
+2. Configurable model warm-up flow: completed
+3. Integrity provenance for remote downloads: completed
+4. Performance telemetry actionability: completed
+5. Model selection defaults per language family: completed
+6. Periodic stale-artifact cleanup automation: completed
+7. Stronger cancellation semantics in download pipeline: completed
+8. Test coverage for transient download states: completed
+9. Deterministic startup migration checks: completed
+10. Cross-platform smoke matrix doc + script: completed
+11. Explicit clipboard outcome metrics: completed
+12. First-run setup wizard: completed
 
-2. Add configurable model warm-up profiles
-   - `low_memory`, `balanced`, `quality` presets affecting `keep_model_loaded`, thread cap, and first-run preloads.
+## Next Follow-Up Ideas
 
-3. Add integrity provenance for remote downloads
-   - Add checksum manifest download support (registry JSON or detached manifest file) so drift is detected before install finalize.
-
-4. Add performance telemetry actionability
-   - Emit structured performance samples (download, transcribe, insert p50/p95) and wire them into a lightweight dashboard in the UI.
-
-5. Add model selection defaults per language family
-   - Provide explicit user-facing recommendation for English-only vs multilingual path based on configured language.
-
-6. Add periodic stale-artifact cleanup automation
-   - Add a background cleanup task for stale `.part` and non-`*.bin` model artifacts and stale sidecar files.
-
-7. Add stronger cancellation semantics in download pipeline
-   - Distinguish cancellation reason, network failure reason, checksum failure reason in progress/status updates.
-
-8. Add test coverage for transient download states
-   - Unit/integration-style tests for retry, backoff delay calculations, cancellation, and partial-byte recovery.
-
-9. Add deterministic startup migration checks
-   - Validate `model_dir`, `config` path safety, and model permissions in a startup health report before user interacts.
-
-10. Add cross-platform smoke matrix doc + scripts
-   - Non-macOS flow checks, macOS accessibility/microphone permission matrix, and model download/install smoke steps.
-
-11. Add explicit clipboard outcome metrics
-   - Track whether transcription was inserted automatically, manually copied, or failed to paste, and expose counts in status/perf panel.
-
-12. Add first-run setup wizard
-   - Permission checks + recommended model + quick validation pass for a frictionless enterprise onboarding path.
+1. Add a persistent onboarding completion flag so enterprise deployments can suppress the wizard after policy-based provisioning.
+2. Add signed manifest verification for checksum sources, not just detached hash transport.
+3. Add an in-app release diagnostics export bundle for support teams.
+4. Add integration tests around startup-health events and warm-up behavior.
 
 ## Files to Keep Watching
 
@@ -67,4 +56,3 @@ Spiel is materially stronger for enterprise deployment, but we still have room b
 - `docs/UNIVERSAL_REVIEW_NEXT_SESSION.md`
 - `docs/PRODUCTION_ENHANCEMENT_NEXT_SESSION.md`
 - `BUG_HUNT_REPORT.md`
-

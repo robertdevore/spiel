@@ -27,6 +27,7 @@ This keeps source-of-truth in `src/` and `src-tauri/src/`, with only build/refer
 - Start recording → transcribe → insert path in one worker thread.
 - Model-driven fallback messages for permission and startup issues.
 - Model list with install state (`installed`, `partial`, `corrupt`, `missing`, `unsafe_path`).
+- Startup health diagnostics and a first-run setup wizard for model, permission, and warm-up guidance.
 
 ## Universal/Enterprise Characteristics
 
@@ -44,6 +45,7 @@ This keeps source-of-truth in `src/` and `src-tauri/src/`, with only build/refer
   - recording duration clamp
   - install cache + path checks
   - install health visibility (`installed`, `partial`, `corrupt`, `missing`, `unsafe_path`) with reason and age metadata
+  - startup health snapshot + guided setup actions
 
 ## Supported Models
 
@@ -87,11 +89,13 @@ npm run tauri dev
 - `update_config`
 - `list_models`
 - `get_readiness`
+- `get_startup_health`
 - `download_model`
 - `delete_model`
 - `cancel_download`
 - `toggle_dictation`
 - `unload_model_from_memory`
+- `warm_up_model`
 - `accessibility_status`
 - `request_accessibility`
 - `show_settings`
@@ -107,6 +111,9 @@ npm run tauri dev
 - `SPIEL_DOWNLOAD_CONNECT_TIMEOUT_MS` and `SPIEL_DOWNLOAD_TIMEOUT_MS` for download robustness.
 - `SPIEL_DOWNLOAD_RETRIES` (`0..8`) for transient download retries (default `2` retries).
 - `SPIEL_DOWNLOAD_RETRY_BACKOFF_MS` (`100..30000`, default `250`) for initial retry delay before each attempt.
+- `SPIEL_MODEL_MANIFEST_URL` for detached checksum manifests keyed by filename.
+- `SPIEL_MAINTENANCE_POLL_MS` for background stale-artifact cleanup cadence.
+- `SPIEL_WARMUP_ON_START` to pre-validate/preload the current model on launch.
 
 ### Integrity behavior
 
@@ -131,6 +138,7 @@ npm run tauri dev
 - Optional “keep model in RAM” controls let you trade startup latency for memory footprint.
 - Dictation duration is clamped to sane values (`5..600` seconds).
 - Readiness diagnostics report current model-store footprint to support disk/memory planning.
+- Perf diagnostics now include stage averages, p50/p95 totals, paste-vs-clipboard outcomes, and download latency samples.
 
 ## Security & Privacy
 
@@ -157,7 +165,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 - **Auto-paste does nothing**: Accessibility must be trusted.
 - **Transcription is slow**: switch to multilingual `small`/`base` trade-off, or lower threads/disable `keep_model_loaded` for memory.
 - **Install is repeatedly failing with checksum errors**: remove corrupted model + sidecar and retry. Sidecar validation is intentionally strict to prevent silent corruption.
+- **First transcription feels slow after launch**: use `Warm Current Model`, or enable `keep_model_loaded` and `SPIEL_WARMUP_ON_START=1`.
 
 ## Roadmap
 
-The next engineering pass is tracked in `docs/RELEASE_READINESS_NEXT_SESSION.md`.
+The next engineering pass is tracked in `docs/RELEASE_READINESS_NEXT_SESSION_2026-06-07.md`.
