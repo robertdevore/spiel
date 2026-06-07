@@ -13,7 +13,7 @@ use crate::error::{Result, SpielError};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -51,6 +51,8 @@ pub struct InstallInfo {
     pub status: InstallStatus,
     /// Bytes currently present for the model file or `.part` file.
     pub bytes: u64,
+    /// Last-modified timestamp (ms since UNIX epoch) for installed/partial files.
+    pub modified_ms: Option<u64>,
     /// Optional detail string for richer diagnostics.
     pub reason: String,
 }
@@ -219,6 +221,7 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
         return InstallInfo {
             status: InstallStatus::Missing,
             bytes: 0,
+            modified_ms: None,
             reason: "unknown model id".into(),
         };
     };
@@ -230,6 +233,7 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
         return InstallInfo {
             status: InstallStatus::UnsafePath,
             bytes: 0,
+            modified_ms: None,
             reason: err.to_string(),
         };
     }
@@ -238,6 +242,12 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
         Ok(size) => InstallInfo {
             status: InstallStatus::Installed,
             bytes: size,
+            modified_ms: path
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64),
             reason: String::new(),
         },
         Err(SpielError::ModelMissing) => {
@@ -247,22 +257,32 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
                         Ok(meta) if meta.is_file() => InstallInfo {
                             status: InstallStatus::Partial,
                             bytes: meta.len(),
+                            modified_ms: meta
+                                .modified()
+                                .ok()
+                                .and_then(|modified| {
+                                    modified.duration_since(std::time::UNIX_EPOCH).ok()
+                                })
+                                .map(|d| d.as_millis() as u64),
                             reason: String::new(),
                         },
                         Ok(_) => InstallInfo {
                             status: InstallStatus::Missing,
                             bytes: 0,
+                            modified_ms: None,
                             reason: String::new(),
                         },
                         Err(err) => InstallInfo {
                             status: InstallStatus::Corrupt,
                             bytes: 0,
+                            modified_ms: None,
                             reason: format!("partial file is not readable: {err}"),
                         },
                     },
                     Err(err) => InstallInfo {
                         status: InstallStatus::UnsafePath,
                         bytes: 0,
+                        modified_ms: None,
                         reason: err.to_string(),
                     },
                 };
@@ -271,12 +291,19 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
             InstallInfo {
                 status: InstallStatus::Missing,
                 bytes: 0,
+                modified_ms: None,
                 reason: String::new(),
             }
         }
         Err(err) => InstallInfo {
             status: InstallStatus::Corrupt,
             bytes: path.metadata().map(|m| m.len()).unwrap_or(0),
+            modified_ms: path
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64),
             reason: err.to_string(),
         },
     }
@@ -362,6 +389,45 @@ pub fn download(
         .build()
         .map_err(|e| SpielError::Download(e.to_string()))?;
 
+    let max_retries = load_download_retries("SPIEL_DOWNLOAD_RETRIES", 2);
+    let base_backoff_ms = load_download_backoff_ms("SPIEL_DOWNLOAD_RETRY_BACKOFF_MS", 250);
+    let mut attempt: u32 = 0;
+
+    loop {
+        let attempt_delay = retry_delay_ms(base_backoff_ms, attempt);
+        if attempt > 0 && attempt_delay > 0 {
+            std::thread::sleep(Duration::from_millis(attempt_delay));
+        }
+
+        let downloaded = download_once(
+            &client,
+            spec,
+            &part_path,
+            &final_path,
+            &mut on_progress,
+            &should_cancel,
+        );
+        match downloaded {
+            Ok(()) => return Ok(()),
+            Err(err) if is_download_cancelled(&err) => return Err(err),
+            Err(_err) if attempt < max_retries => {
+                attempt = attempt.saturating_add(1);
+                let _ = std::fs::remove_file(&part_path);
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn download_once(
+    client: &reqwest::blocking::Client,
+    spec: &ModelSpec,
+    part_path: &Path,
+    final_path: &Path,
+    on_progress: &mut impl FnMut(u64, Option<u64>),
+    should_cancel: &impl Fn() -> bool,
+) -> Result<()> {
     let mut resp = client
         .get(spec.url)
         .send()
@@ -376,8 +442,7 @@ pub fn download(
     }
 
     let total = resp.content_length();
-    let mut file = open_part_file(&part_path)?;
-    let mut hasher = Sha256::new();
+    let mut file = open_part_file(part_path)?;
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 64 * 1024];
 
@@ -386,7 +451,7 @@ pub fn download(
     while download_result.is_ok() {
         if should_cancel() {
             drop(file);
-            let _ = std::fs::remove_file(&part_path);
+            let _ = std::fs::remove_file(part_path);
             return Err(SpielError::Download("canceled".into()));
         }
         let n = resp
@@ -402,38 +467,26 @@ pub fn download(
         if download_result.is_err() {
             break;
         }
-        hasher.update(&buf[..n]);
         downloaded += n as u64;
         on_progress(downloaded, total);
     }
     if let Err(e) = download_result {
-        let _ = std::fs::remove_file(&part_path);
+        let _ = std::fs::remove_file(part_path);
         return Err(e);
     }
     file.sync_all().ok();
     drop(file);
 
     if let Err(e) = ensure_complete_download(total, downloaded) {
-        let _ = std::fs::remove_file(&part_path);
+        let _ = std::fs::remove_file(part_path);
         return Err(e);
     }
 
-    // Verify pinned hash (when present) before we trust the bytes.
-    if !spec.sha256.is_empty() {
-        let got = hex(&hasher.finalize());
-        if !got.eq_ignore_ascii_case(spec.sha256) {
-            let _ = std::fs::remove_file(&part_path);
-            return Err(SpielError::Download(
-                "checksum mismatch — download may be corrupt. Please retry.".into(),
-            ));
-        }
-    }
-
-    validate_file(&part_path, spec).inspect_err(|_| {
-        let _ = std::fs::remove_file(&part_path);
+    validate_file(part_path, spec).inspect_err(|_| {
+        let _ = std::fs::remove_file(part_path);
     })?;
 
-    std::fs::rename(&part_path, &final_path)
+    std::fs::rename(part_path, final_path)
         .map_err(|e| SpielError::Download(format!("could not finalize model: {e}")))?;
     Ok(())
 }
@@ -466,7 +519,71 @@ fn validate_model_file_with_open_handle(
             len, min
         )));
     }
+
+    if let Some(expected) = expected_checksum(path, spec)? {
+        f.seek(SeekFrom::Start(0)).map_err(|_| {
+            SpielError::Model(format!(
+                "failed to rewind model file for checksum: {path:?}"
+            ))
+        })?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = f.read(&mut buf).map_err(|_| {
+                SpielError::Model(format!(
+                    "failed to read model for checksum validation: {path:?}"
+                ))
+            })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let got = hex(&hasher.finalize());
+        if !got.eq_ignore_ascii_case(&expected) {
+            return Err(SpielError::Model(format!(
+                "{path:?} checksum mismatch: expected {} but got {}",
+                expected, got
+            )));
+        }
+    }
+
     Ok(len)
+}
+
+fn expected_checksum(path: &Path, spec: &ModelSpec) -> Result<Option<String>> {
+    if !spec.sha256.is_empty() {
+        return Ok(Some(spec.sha256.to_lowercase()));
+    }
+
+    let sidecar = sidecar_path(path);
+    if !sidecar.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&sidecar).map_err(|_| {
+        SpielError::Model(format!(
+            "cannot read checksum sidecar: {}",
+            sidecar.display()
+        ))
+    })?;
+    let token = raw.split_whitespace().next().ok_or_else(|| {
+        SpielError::Model(format!("checksum sidecar is empty: {}", sidecar.display()))
+    })?;
+
+    if token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SpielError::Model(format!(
+            "invalid checksum sidecar format: {}",
+            sidecar.display()
+        )));
+    }
+
+    Ok(Some(token.to_lowercase()))
+}
+
+fn sidecar_path(model_path: &Path) -> std::path::PathBuf {
+    let file_name = model_path.file_name().unwrap_or_default();
+    model_path.with_file_name(format!("{}.sha256", file_name.to_string_lossy()))
 }
 
 /// Existing tests and older callsites still validate by path.
@@ -548,6 +665,45 @@ fn parse_download_timeout_ms(raw: Option<&str>, default_ms: u64) -> u64 {
         .unwrap_or(default_ms)
 }
 
+fn load_download_retries(name: &str, default_retries: u32) -> u32 {
+    parse_download_retries(std::env::var(name).ok().as_deref(), default_retries)
+}
+
+fn parse_download_retries(raw: Option<&str>, default_retries: u32) -> u32 {
+    raw.and_then(|raw| raw.trim().parse::<u32>().ok())
+        .map(|v| v.clamp(0, 8))
+        .unwrap_or(default_retries)
+}
+
+fn load_download_backoff_ms(name: &str, default_ms: u64) -> u64 {
+    parse_download_backoff_ms(std::env::var(name).ok().as_deref(), default_ms)
+}
+
+fn parse_download_backoff_ms(raw: Option<&str>, default_ms: u64) -> u64 {
+    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(100, 30_000))
+        .unwrap_or(default_ms)
+}
+
+fn retry_delay_ms(base_ms: u64, attempt: u32) -> u64 {
+    if attempt == 0 || base_ms == 0 {
+        return 0;
+    }
+    let multiplier = 1_u64 << attempt.min(8);
+    let jitter = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.subsec_nanos() as u64 % base_ms.max(1))
+        .unwrap_or(0);
+    let base = base_ms.saturating_mul(multiplier);
+    let bounded = base.min(5_000);
+    bounded.saturating_add(jitter / 2)
+}
+
+fn is_download_cancelled(err: &SpielError) -> bool {
+    matches!(err, SpielError::Download(reason) if reason == "canceled")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +777,22 @@ mod tests {
             86_400_000
         );
         assert_eq!(parse_download_timeout_ms(None, 10_000), 10_000);
+    }
+
+    #[test]
+    fn download_retry_controls_have_sane_defaults() {
+        assert_eq!(load_download_retries("SPIEL_NOT_SET", 2), 2);
+        assert_eq!(parse_download_retries(Some("4"), 2), 4);
+        assert_eq!(parse_download_retries(Some("99"), 2), 8);
+        assert_eq!(parse_download_retries(Some("bad"), 2), 2);
+    }
+
+    #[test]
+    fn download_retry_backoff_respects_bounds() {
+        assert_eq!(parse_download_backoff_ms(Some("0"), 250), 100);
+        assert_eq!(parse_download_backoff_ms(Some("40000"), 250), 30_000);
+        assert_eq!(parse_download_backoff_ms(Some("75"), 250), 100);
+        assert_eq!(parse_download_backoff_ms(None, 250), 250);
     }
 
     #[test]
@@ -707,6 +879,79 @@ mod tests {
             inspect_install(&dir, "tiny.en").status,
             InstallStatus::Corrupt
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn checksum_sidecar_is_honored_for_local_checks() {
+        let dir = std::env::temp_dir().join(format!(
+            "spiel-checksum-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let s = ModelSpec {
+            id: "test-local-checksum",
+            label: "Test",
+            filename: "test.ggml.bin",
+            url: "",
+            approx_mb: 0,
+            sha256: "",
+            multilingual: true,
+            note: "",
+        };
+
+        let bytes = vec![0x6c, 0x6d, 0x67, 0x67, 0, 1, 2, 3];
+        let path = dir.join(s.filename);
+        let checksum = hex(&Sha256::digest(&bytes));
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::write(
+            path.with_file_name(format!("{}.sha256", s.filename)),
+            format!("{checksum}\n"),
+        )
+        .unwrap();
+
+        assert!(validate_model_file(&path, &s).is_ok());
+
+        let bad_checksum = "00".repeat(32);
+        std::fs::write(
+            path.with_file_name(format!("{}.sha256", s.filename)),
+            format!("{bad_checksum}\n"),
+        )
+        .unwrap();
+        assert!(validate_model_file(&path, &s).is_err());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_file_name(format!("{}.sha256", s.filename)));
+    }
+
+    #[test]
+    fn install_info_exposes_mod_time_when_file_exists() {
+        let dir = std::env::temp_dir().join("spiel_model_install_modified");
+        let _ = std::fs::create_dir_all(&dir);
+        let s = spec("tiny.en").unwrap();
+        let path = dir.join(s.filename);
+        let bytes = vec![0x6c, 0x6d, 0x67, 0x67];
+        std::fs::write(&path, bytes).unwrap();
+
+        let info = inspect_install(&dir, "tiny.en");
+        assert!(matches!(info.status, InstallStatus::Corrupt));
+        let meta_info = std::fs::metadata(&path).unwrap();
+        let expected = meta_info
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64);
+
+        if let Some(expected_ms) = expected {
+            assert_eq!(info.modified_ms, Some(expected_ms));
+        }
+
         let _ = std::fs::remove_file(&path);
     }
 

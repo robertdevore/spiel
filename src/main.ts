@@ -42,6 +42,8 @@ interface ModelView {
   installed: boolean;
   install_status: string;
   install_bytes: number;
+  install_modified_ms: number | null;
+  install_reason: string;
   is_current: boolean;
 }
 
@@ -173,6 +175,17 @@ const MEMORY_PROFILES: MemoryProfile[] = [
 function fmtBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTimeAgo(modifiedMs: number): string {
+  const ageMs = Date.now() - modifiedMs;
+  if (ageMs < 60_000) return "just now";
+  const ageMins = Math.floor(ageMs / 60_000);
+  if (ageMins < 60) return `${ageMins} min ago`;
+  const ageHours = Math.floor(ageMins / 60);
+  if (ageHours < 24) return `${ageHours} hr ago`;
+  const ageDays = Math.floor(ageHours / 24);
+  return `${ageDays}d ago`;
 }
 
 async function refreshAll() {
@@ -451,7 +464,17 @@ function modelsCard(): HTMLElement {
     const meta = document.createElement("div");
     meta.className = "meta";
     const sizeText = m.install_bytes ? `${fmtBytes(m.install_bytes)}` : "not present";
-    const statusText = m.install_status === "installed" ? "Installed" : `${m.install_status} (${sizeText})`;
+    const statusParts: string[] = [
+      m.install_status === "installed" ? "Installed" : `${m.install_status} (${sizeText})`,
+    ];
+    if (!m.installed && m.install_reason) {
+      statusParts.push(m.install_reason);
+    }
+    if (!m.installed && m.install_modified_ms !== null) {
+      statusParts.push(`modified ${formatTimeAgo(m.install_modified_ms)}`);
+    }
+
+    const statusText = statusParts.join(" · ");
     const badgeClass = m.install_status === "installed" ? "badge" : "warn";
     meta.innerHTML = `<span class="name">${m.label} · ~${m.approx_mb} MB</span>
       <span class="note">${m.note}</span>

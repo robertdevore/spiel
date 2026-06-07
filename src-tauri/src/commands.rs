@@ -21,6 +21,8 @@ pub struct ModelView {
     pub installed: bool,
     pub install_status: String,
     pub install_bytes: u64,
+    pub install_modified_ms: Option<u64>,
+    pub install_reason: String,
     pub is_current: bool,
 }
 
@@ -243,6 +245,8 @@ pub fn list_models(state: State<AppState>) -> Vec<ModelView> {
                 installed: install.is_installed(),
                 install_status: install.as_label().to_string(),
                 install_bytes: install.bytes,
+                install_modified_ms: install.modified_ms,
+                install_reason: install.reason.clone(),
                 is_current: m.id == current,
             }
         })
