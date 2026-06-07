@@ -2,11 +2,13 @@
 
 use crate::audio::Recorder;
 use crate::config::{Config, Paths};
+use crate::model;
 use crate::whisper::Transcriber;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{collections::VecDeque, env};
 
 /// Where the dictation loop currently is. Drives the tray icon and the UI.
@@ -26,6 +28,14 @@ pub struct StatusState {
     /// Last auto-paste needed Accessibility permission that wasn't granted.
     pub needs_accessibility: bool,
 }
+
+#[derive(Clone)]
+struct CachedModelInstall {
+    info: model::InstallInfo,
+    checked_at: Instant,
+}
+
+const MODEL_INSTALL_TTL: Duration = Duration::from_millis(500);
 
 impl Default for StatusState {
     fn default() -> Self {
@@ -54,6 +64,7 @@ pub struct AppState {
     /// Lazily-loaded, cached model context. Reloaded when the model setting changes.
     pub transcriber: Mutex<Option<Transcriber>>,
     pub download: Mutex<DownloadState>,
+    model_install_cache: Mutex<HashMap<String, CachedModelInstall>>,
     pub perf: Mutex<PerfState>,
 }
 
@@ -66,6 +77,7 @@ impl AppState {
             recorder: Mutex::new(None),
             transcriber: Mutex::new(None),
             download: Mutex::new(DownloadState::default()),
+            model_install_cache: Mutex::new(HashMap::new()),
             perf: Mutex::new(PerfState::new()),
         }
     }
@@ -133,6 +145,38 @@ pub struct StatusSnapshot {
 }
 
 impl AppState {
+    pub fn model_install_info(&self, model_id: &str) -> model::InstallInfo {
+        let now = Instant::now();
+        if let Some(cached) = self
+            .model_install_cache
+            .lock()
+            .unwrap()
+            .get(model_id)
+            .filter(|entry| now.duration_since(entry.checked_at) < MODEL_INSTALL_TTL)
+            .cloned()
+        {
+            return cached.info;
+        }
+
+        let fresh = model::inspect_install(&self.paths.model_dir, model_id);
+        self.model_install_cache.lock().unwrap().insert(
+            model_id.to_string(),
+            CachedModelInstall {
+                info: fresh.clone(),
+                checked_at: now,
+            },
+        );
+        fresh
+    }
+
+    pub fn clear_model_install_cache(&self) {
+        self.model_install_cache.lock().unwrap().clear();
+    }
+
+    pub fn clear_model_install_cache_entry(&self, model_id: &str) {
+        self.model_install_cache.lock().unwrap().remove(model_id);
+    }
+
     pub fn snapshot(&self) -> StatusSnapshot {
         let status = self.status.lock().unwrap();
         let config = self.config.lock().unwrap();
@@ -149,7 +193,7 @@ impl AppState {
             needs_accessibility: status.needs_accessibility && !crate::accessibility::is_trusted(),
             recording_elapsed_ms: elapsed,
             model_id: config.model.clone(),
-            model_installed: crate::model::is_installed(&self.paths.model_dir, &config.model),
+            model_installed: self.model_install_info(&config.model).is_installed(),
             accessibility_trusted: crate::accessibility::is_trusted(),
         }
     }

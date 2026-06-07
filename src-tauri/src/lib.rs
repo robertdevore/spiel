@@ -17,6 +17,8 @@ mod whisper;
 
 use config::{Config, Paths};
 use state::AppState;
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -37,6 +39,13 @@ pub fn run() {
                 .filter(|v| !v.is_empty())
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| data_dir.join("models"));
+            let model_dir = match resolve_model_dir(model_dir, &data_dir) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("[spiel] invalid SPIEL_MODEL_DIR, using default: {error}");
+                    data_dir.join("models")
+                }
+            };
             let paths = Paths {
                 config_file: config_dir.join("config.json"),
                 model_dir,
@@ -77,6 +86,8 @@ pub fn run() {
             }
 
             dictation::emit_status(&handle);
+
+            start_accessibility_poll(handle.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -143,6 +154,67 @@ pub fn register_hotkey(app: &tauri::AppHandle, spec: &str) -> error::Result<()> 
             "Could not register hotkey '{spec}': {e}. It may already be in use by another app."
         ))
     })
+}
+
+fn resolve_model_dir(model_dir: PathBuf, fallback_root: &Path) -> Result<PathBuf, String> {
+    let resolved = if model_dir.is_relative() {
+        fallback_root.join(model_dir)
+    } else {
+        model_dir
+    };
+
+    validate_path_components(&resolved).map_err(|e| e.to_string())?;
+
+    if resolved.exists() {
+        let md = std::fs::metadata(&resolved)
+            .map_err(|e| format!("cannot access model directory {resolved:?}: {e}"))?;
+        if !md.is_dir() {
+            return Err(format!("model directory is not a directory: {resolved:?}"));
+        }
+    }
+
+    std::fs::create_dir_all(&resolved)
+        .map_err(|e| format!("cannot create model directory {resolved:?}: {e}"))?;
+    Ok(resolved)
+}
+
+fn validate_path_components(path: &Path) -> std::result::Result<(), String> {
+    let mut cursor = PathBuf::new();
+    for c in path.components() {
+        cursor.push(c.as_os_str());
+        if let Component::CurDir = c {
+            continue;
+        }
+        if let Component::ParentDir = c {
+            return Err("parent directory reference is not allowed in model path".to_string());
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(&cursor) {
+            if meta.file_type().is_symlink() {
+                return Err(format!("model path component {cursor:?} is a symlink"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn start_accessibility_poll(app: tauri::AppHandle) {
+    let poll_interval = std::env::var("SPIEL_ACCESSIBILITY_POLL_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(250, 30_000))
+        .unwrap_or(1_000);
+
+    std::thread::spawn(move || {
+        let mut last = accessibility::is_trusted();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(poll_interval));
+            let current = accessibility::is_trusted();
+            if current != last {
+                last = current;
+                dictation::emit_status(&app);
+            }
+        }
+    });
 }
 
 /// Validate a hotkey string without registering it. Used to reject bad input early.

@@ -74,7 +74,7 @@ fn start(app: &AppHandle) {
     };
 
     // Refuse to "record into the void": without a model there's nothing to transcribe.
-    if !model::is_installed(&state.paths.model_dir, &model_id) {
+    if !state.model_install_info(&model_id).is_installed() {
         state.set_phase(
             Phase::Error,
             Some("Speech model not installed. Open Settings to download it.".into()),

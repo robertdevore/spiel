@@ -16,8 +16,8 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
-/// GGML container magic. whisper.cpp writes the u32 `0x67676d6c` ("ggml"), which lands on
-/// disk little-endian as the bytes `6c 6d 67 67`. We compare as a LE u32 to stay correct.
+/// GGML container magic. whisper.cpp writes the u32 `0x67676d6c` ("ggml"), which lands
+/// on disk little-endian as the bytes `6c 6d 67 67`.
 const GGML_MAGIC: u32 = 0x6767_6d6c;
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +33,41 @@ pub struct ModelSpec {
     /// True for multilingual checkpoints; false means English-only variants.
     pub multilingual: bool,
     pub note: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallStatus {
+    Missing,
+    Installed,
+    Partial,
+    Corrupt,
+    UnsafePath,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallInfo {
+    pub status: InstallStatus,
+    /// Bytes currently present for the model file or `.part` file.
+    pub bytes: u64,
+    /// Optional detail string for richer diagnostics.
+    pub reason: String,
+}
+
+impl InstallInfo {
+    pub fn as_label(&self) -> &'static str {
+        match self.status {
+            InstallStatus::Missing => "missing",
+            InstallStatus::Installed => "installed",
+            InstallStatus::Partial => "partial",
+            InstallStatus::Corrupt => "corrupt",
+            InstallStatus::UnsafePath => "unsafe_path",
+        }
+    }
+
+    pub fn is_installed(&self) -> bool {
+        self.status == InstallStatus::Installed
+    }
 }
 
 /// Models offered in the UI.
@@ -160,9 +195,76 @@ pub fn normalize_language_hint(language: &str) -> String {
 
 /// Is the model for `id` present and structurally valid on disk?
 pub fn is_installed(model_dir: &Path, id: &str) -> bool {
-    let Some(spec) = spec(id) else { return false };
+    inspect_install(model_dir, id).is_installed()
+}
+
+/// Lightweight install-state check for polling/UI.
+pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
+    let Some(spec) = spec(id) else {
+        return InstallInfo {
+            status: InstallStatus::Missing,
+            bytes: 0,
+            reason: "unknown model id".into(),
+        };
+    };
+
     let path = model_dir.join(spec.filename);
-    is_safe_model_path(&path, "model").is_ok() && validate_file(&path, spec).is_ok()
+    let part_path = model_dir.join(format!("{}.part", spec.filename));
+
+    if let Err(err) = is_safe_model_path(&path, "model") {
+        return InstallInfo {
+            status: InstallStatus::UnsafePath,
+            bytes: 0,
+            reason: err.to_string(),
+        };
+    }
+
+    match validate_model_file(&path, spec) {
+        Ok(size) => InstallInfo {
+            status: InstallStatus::Installed,
+            bytes: size,
+            reason: String::new(),
+        },
+        Err(SpielError::ModelMissing) => {
+            if part_path.exists() {
+                return match is_safe_model_path(&part_path, "temporary model file") {
+                    Ok(()) => match part_path.metadata() {
+                        Ok(meta) if meta.is_file() => InstallInfo {
+                            status: InstallStatus::Partial,
+                            bytes: meta.len(),
+                            reason: String::new(),
+                        },
+                        Ok(_) => InstallInfo {
+                            status: InstallStatus::Missing,
+                            bytes: 0,
+                            reason: String::new(),
+                        },
+                        Err(err) => InstallInfo {
+                            status: InstallStatus::Corrupt,
+                            bytes: 0,
+                            reason: format!("partial file is not readable: {err}"),
+                        },
+                    },
+                    Err(err) => InstallInfo {
+                        status: InstallStatus::UnsafePath,
+                        bytes: 0,
+                        reason: err.to_string(),
+                    },
+                };
+            }
+
+            InstallInfo {
+                status: InstallStatus::Missing,
+                bytes: 0,
+                reason: String::new(),
+            }
+        }
+        Err(err) => InstallInfo {
+            status: InstallStatus::Corrupt,
+            bytes: path.metadata().map(|m| m.len()).unwrap_or(0),
+            reason: err.to_string(),
+        },
+    }
 }
 
 /// Download `spec` to `model_dir`, calling `on_progress(downloaded, total)` as it goes.
@@ -277,25 +379,39 @@ pub fn download(
 }
 
 /// Structural validation independent of any pinned hash: header magic + plausible size.
-fn validate_file(path: &Path, spec: &ModelSpec) -> Result<()> {
+fn validate_model_file(path: &Path, spec: &ModelSpec) -> Result<u64> {
     let mut f = std::fs::File::open(path).map_err(|_| SpielError::ModelMissing)?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    validate_model_file_with_open_handle(&mut f, spec, path, len)
+}
+
+fn validate_model_file_with_open_handle(
+    f: &mut std::fs::File,
+    spec: &ModelSpec,
+    path: &Path,
+    len: u64,
+) -> Result<u64> {
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)
         .map_err(|_| SpielError::Model("model file is truncated".into()))?;
     if u32::from_le_bytes(magic) != GGML_MAGIC {
-        return Err(SpielError::Model(
-            "file is not a valid GGML whisper model".into(),
-        ));
+        return Err(SpielError::Model(format!(
+            "{path:?} is not a valid GGML whisper model"
+        )));
     }
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    // Guard against a header-only stub; require at least half the expected size.
     let min = min_size_bytes(spec);
     if len < min {
-        return Err(SpielError::Model(
-            "model file is smaller than expected".into(),
-        ));
+        return Err(SpielError::Model(format!(
+            "{path:?} is smaller than expected ({} < {})",
+            len, min
+        )));
     }
-    Ok(())
+    Ok(len)
+}
+
+/// Existing tests and older callsites still validate by path.
+fn validate_file(path: &Path, spec: &ModelSpec) -> Result<()> {
+    validate_model_file(path, spec).map(|_| ())
 }
 
 fn min_size_bytes(spec: &ModelSpec) -> u64 {
@@ -335,7 +451,7 @@ fn is_safe_model_path(path: &Path, label: &str) -> Result<()> {
         Err(e) => {
             return Err(SpielError::Download(format!(
                 "cannot check {label} path {path:?}: {e}"
-            )))
+            )));
         }
     }
     Ok(())
@@ -443,6 +559,46 @@ mod tests {
     fn missing_file_not_installed() {
         let dir = std::env::temp_dir().join("spiel_model_test_missing");
         assert!(!is_installed(&dir, "base.en"));
+        assert_eq!(
+            inspect_install(&dir, "base.en").status,
+            InstallStatus::Missing
+        );
+    }
+
+    #[test]
+    fn partial_download_is_reported() {
+        let dir = std::env::temp_dir().join("spiel_model_partial_check");
+        let _ = std::fs::create_dir_all(&dir);
+        let spec = spec("base.en").unwrap();
+        let part_path = dir.join(format!("{}.part", spec.filename));
+        let _ = std::fs::write(&part_path, b"partial-bytes");
+
+        let info = inspect_install(&dir, "base.en");
+        assert_eq!(info.status, InstallStatus::Partial);
+        assert!(info.bytes > 0);
+
+        let _ = std::fs::remove_file(&part_path);
+    }
+
+    #[test]
+    fn malformed_file_is_not_installed() {
+        let dir = std::env::temp_dir().join("spiel_model_installed_check");
+        let _ = std::fs::create_dir_all(&dir);
+        let s = spec("tiny.en").unwrap();
+        let path = dir.join(s.filename);
+        // Large enough to pass size-only checks, but invalid GGML content.
+        std::fs::write(
+            &path,
+            vec![0_u8; (s.approx_mb as usize * 1024 * 1024 / 2) + 1024],
+        )
+        .unwrap();
+
+        assert!(!is_installed(&dir, "tiny.en"));
+        assert_eq!(
+            inspect_install(&dir, "tiny.en").status,
+            InstallStatus::Corrupt
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -459,22 +615,6 @@ mod tests {
         std::fs::write(&path, b"NOTAMODEL").unwrap();
         let s = spec("base.en").unwrap();
         assert!(validate_file(&path, s).is_err());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn malformed_file_is_not_installed() {
-        let dir = std::env::temp_dir().join("spiel_model_installed_check");
-        let _ = std::fs::create_dir_all(&dir);
-        let s = spec("tiny.en").unwrap();
-        let path = dir.join(s.filename);
-        // Large enough to pass size-only checks, but invalid GGML content.
-        std::fs::write(
-            &path,
-            vec![0_u8; (s.approx_mb as usize * 1024 * 1024 / 2) + 1024],
-        )
-        .unwrap();
-        assert!(!is_installed(&dir, "tiny.en"));
         let _ = std::fs::remove_file(&path);
     }
 

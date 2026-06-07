@@ -39,6 +39,8 @@ interface ModelView {
   approx_mb: number;
   note: string;
   installed: boolean;
+  install_status: string;
+  install_bytes: number;
   is_current: boolean;
 }
 
@@ -392,8 +394,12 @@ function modelsCard(): HTMLElement {
     row.className = `model${m.is_current ? " current" : ""}`;
     const meta = document.createElement("div");
     meta.className = "meta";
+    const sizeText = m.install_bytes ? `${fmtBytes(m.install_bytes)}` : "not present";
+    const statusText = m.install_status === "installed" ? "Installed" : `${m.install_status} (${sizeText})`;
+    const badgeClass = m.install_status === "installed" ? "badge" : "warn";
     meta.innerHTML = `<span class="name">${m.label} · ~${m.approx_mb} MB</span>
-      <span class="note">${m.note}</span>`;
+      <span class="note">${m.note}</span>
+      <span class="note ${badgeClass}">${statusText}</span>`;
     row.appendChild(meta);
 
     const dl = downloads[m.id];
@@ -429,8 +435,9 @@ function modelsCard(): HTMLElement {
         row.appendChild(deleteBtn);
       }
     } else {
+      const isRecoverable = m.install_status === "partial" || m.install_status === "corrupt";
       const dlBtn = document.createElement("button");
-      dlBtn.textContent = "Download";
+      dlBtn.textContent = isRecoverable ? "Repair" : "Download";
       dlBtn.onclick = () => {
         lastError = "";
         downloads[m.id] = { downloaded: 0, total: null };

@@ -18,6 +18,8 @@ pub struct ModelView {
     pub approx_mb: u32,
     pub note: String,
     pub installed: bool,
+    pub install_status: String,
+    pub install_bytes: u64,
     pub is_current: bool,
 }
 
@@ -90,6 +92,7 @@ pub fn update_config(
     if validated.model != old_model || (old_keep_model_loaded && !validated.keep_model_loaded) {
         dictation::clear_model_cache(&state);
     }
+    state.clear_model_install_cache();
 
     dictation::emit_status(&app);
     Ok(validated)
@@ -129,13 +132,18 @@ pub fn list_models(state: State<AppState>) -> Vec<ModelView> {
     let current = state.config.lock().unwrap().model.clone();
     model::REGISTRY
         .iter()
-        .map(|m| ModelView {
-            id: m.id.to_string(),
-            label: m.label.to_string(),
-            approx_mb: m.approx_mb,
-            note: m.note.to_string(),
-            installed: model::is_installed(&state.paths.model_dir, m.id),
-            is_current: m.id == current,
+        .map(|m| {
+            let install = state.model_install_info(m.id);
+            ModelView {
+                id: m.id.to_string(),
+                label: m.label.to_string(),
+                approx_mb: m.approx_mb,
+                note: m.note.to_string(),
+                installed: install.is_installed(),
+                install_status: install.as_label().to_string(),
+                install_bytes: install.bytes,
+                is_current: m.id == current,
+            }
         })
         .collect()
 }
@@ -154,6 +162,7 @@ pub fn download_model(
     if model::is_installed(&state.paths.model_dir, &model_id) {
         return Err(format!("Model '{model_id}' is already installed."));
     }
+    state.clear_model_install_cache_entry(&model_id);
 
     {
         let mut dl = state.download.lock().unwrap();
@@ -201,6 +210,7 @@ pub fn download_model(
         );
 
         if let Some(st) = app.try_state::<AppState>() {
+            st.clear_model_install_cache_entry(&model_id);
             let mut dl = st.download.lock().unwrap();
             dl.active = false;
             dl.model_id = None;
@@ -219,6 +229,13 @@ pub fn download_model(
             },
         };
         let _ = app.emit("model-done", done);
+        if let Some(st) = app.try_state::<AppState>() {
+            st.clear_model_install_cache_entry(&model_id);
+            let current_model = st.config.lock().unwrap().model.clone();
+            if current_model == model_id && result.is_ok() {
+                dictation::clear_model_cache(&st);
+            }
+        }
         dictation::emit_status(&app);
     });
 
@@ -248,6 +265,11 @@ pub fn delete_model(state: State<AppState>, model_id: String) -> Result<(), Stri
         return Err("Cannot delete the active model directly. Switch models first.".into());
     }
 
+    {
+        let mut transcriber = state.transcriber.lock().unwrap();
+        let _previous = transcriber.take();
+    }
+
     std::fs::remove_file(&model_path).map_err(|e| format!("Failed to remove '{model_id}': {e}"))?;
 
     let part_path = state
@@ -256,8 +278,7 @@ pub fn delete_model(state: State<AppState>, model_id: String) -> Result<(), Stri
         .join(format!("{}.part", spec.filename));
     let _ = std::fs::remove_file(part_path);
 
-    let mut transcriber = state.transcriber.lock().unwrap();
-    *transcriber = None;
+    state.clear_model_install_cache_entry(&model_id);
     Ok(())
 }
 
