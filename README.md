@@ -14,11 +14,11 @@ It is designed to feel “quiet” in operation:
 - `src/main.ts` — settings/status UI + model list/actions.
 - `src/styles.css` — minimal styling.
 - `src-tauri/src/` — Rust backend runtime: capture, transcription, downloads, insertion, and IPC.
-- `dist/` — generated frontend bundle from the latest build.
+- `dist/` — generated frontend bundle from the latest build (not required to keep in source control).
 - `docs/` — review notes and release-readiness tracking.
 - `BUG_HUNT_REPORT.md` and `STATUS.md` — prior findings and execution notes.
 
-This keeps source-of-truth in `src/` and `src-tauri/src/`, with only generated or reference artifacts at root.
+This keeps source-of-truth in `src/` and `src-tauri/src/`, with only build/reference artifacts at root.
 
 ## Core Experience
 
@@ -43,6 +43,7 @@ This keeps source-of-truth in `src/` and `src-tauri/src/`, with only generated o
   - thread count clamp
   - recording duration clamp
   - install cache + path checks
+  - install health visibility (`installed`, `partial`, `corrupt`, `missing`, `unsafe_path`) with reason and age metadata
 
 ## Supported Models
 
@@ -104,11 +105,24 @@ npm run tauri dev
 - `SPIEL_PART_CLEANUP_MS` for stale `.part` file cleanup during startup/download (milliseconds, 0 keeps all, defaults to 24h).
 - `SPIEL_PROFILE` and `SPIEL_LATENCY_BUDGET_MS` for profiling behavior.
 - `SPIEL_DOWNLOAD_CONNECT_TIMEOUT_MS` and `SPIEL_DOWNLOAD_TIMEOUT_MS` for download robustness.
+- `SPIEL_DOWNLOAD_RETRIES` (`0..8`) for transient download retries (default `2` retries).
+- `SPIEL_DOWNLOAD_RETRY_BACKOFF_MS` (`100..30000`, default `250`) for initial retry delay before each attempt.
+
+### Integrity behavior
+
+- Registry SHA-256 pins are honored when set.
+- Optional sidecar checksums (`<model>.sha256`) are auto-used for local files when present.
 
 ## Non-macOS behavior
 
 - `playback/copy` auto-paste is macOS-only; non-macOS builds still provide clipboard fallback and clearly surface when explicit permission-based paste is unavailable.
 - Accessibility trust prompts and status are no-ops on non-macOS platforms.
+
+## Architecture
+
+- `src/main.ts` and `src/styles.css`: front-end panel and UX state orchestration.
+- `src-tauri/src/`: backend engine for capture, transcription, insertion, settings, model downloads, and status.
+- `src-tauri/src/commands.rs`: IPC command boundary used by the UI.
 
 ## Performance and Memory
 
@@ -142,6 +156,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 - **Model install says partial/corrupt**: delete and repair from model list, then re-download.
 - **Auto-paste does nothing**: Accessibility must be trusted.
 - **Transcription is slow**: switch to multilingual `small`/`base` trade-off, or lower threads/disable `keep_model_loaded` for memory.
+- **Install is repeatedly failing with checksum errors**: remove corrupted model + sidecar and retry. Sidecar validation is intentionally strict to prevent silent corruption.
 
 ## Roadmap
 
