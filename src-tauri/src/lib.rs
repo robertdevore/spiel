@@ -46,6 +46,11 @@ pub fn run() {
                     data_dir.join("models")
                 }
             };
+            let ttl = model::parse_part_cleanup_ms(
+                std::env::var("SPIEL_PART_CLEANUP_MS").ok().as_deref(),
+                model::default_part_cleanup_duration().as_millis() as u64,
+            );
+            let _ = model::cleanup_stale_part_files(&model_dir, ttl);
             let paths = Paths {
                 config_file: config_dir.join("config.json"),
                 model_dir,
@@ -93,6 +98,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_config,
+            commands::get_readiness,
             commands::get_perf_snapshot,
             commands::clear_perf_samples,
             commands::update_config,

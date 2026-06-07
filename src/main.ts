@@ -13,6 +13,7 @@ interface StatusSnapshot {
   model_id: string;
   model_installed: boolean;
   accessibility_trusted: boolean;
+  accessibility_supported: boolean;
 }
 
 interface Config {
@@ -85,6 +86,19 @@ interface PerfEvent {
   outcome: string;
 }
 
+interface ReadinessSnapshot {
+  model_dir: string;
+  model_dir_writable: boolean;
+  current_model: string;
+  current_model_installed: boolean;
+  model_store_bytes: number;
+  model_store_file_count: number;
+  hotkey_valid: boolean;
+  accessibility_supported: boolean;
+  accessibility_trusted: boolean;
+  active_download: boolean;
+}
+
 interface LanguageOption {
   value: string;
   label: string;
@@ -97,6 +111,7 @@ let models: ModelView[] = [];
 let lastTranscript = "";
 let lastError = "";
 let perf: PerfSnapshot | null = null;
+let readiness: ReadinessSnapshot | null = null;
 let refreshInFlight = false;
 let refreshRequested = false;
 let renderQueued = false;
@@ -167,10 +182,11 @@ async function refreshAll() {
   }
   refreshInFlight = true;
   try {
-    [status, config, models] = await Promise.all([
+    [status, config, models, readiness] = await Promise.all([
       invoke<StatusSnapshot>("get_status"),
       invoke<Config>("get_config"),
       invoke<ModelView[]>("list_models"),
+      invoke<ReadinessSnapshot>("get_readiness"),
     ]);
     perf = await invoke<PerfSnapshot>("get_perf_snapshot");
     syncRecordingClock();
@@ -189,6 +205,7 @@ async function refreshAll() {
 async function refreshStatusOnly() {
   try {
     status = await invoke<StatusSnapshot>("get_status");
+    readiness = await invoke<ReadinessSnapshot>("get_readiness");
     syncRecordingClock();
     render();
   } catch (e) {
@@ -268,7 +285,8 @@ function render() {
   app.appendChild(headerEl());
   if (lastError) app.appendChild(errorBanner(lastError));
   app.appendChild(statusCard(s, c));
-  if (s.needs_accessibility || !s.accessibility_trusted) {
+  app.appendChild(readinessCard());
+  if (s.needs_accessibility || (s.accessibility_supported && !s.accessibility_trusted)) {
     app.appendChild(accessibilityCard(s));
   }
   app.appendChild(transcriptCard());
@@ -352,6 +370,44 @@ function statusCard(s: StatusSnapshot, c: Config): HTMLElement {
     warn.textContent = "Download a speech model below to start dictating.";
     card.appendChild(warn);
   }
+  return card;
+}
+
+function readinessCard(): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<p class="section-title">Readiness</p>`;
+
+  if (!readiness) {
+    const line = document.createElement("div");
+    line.className = "privacy";
+    line.textContent = "Readiness diagnostics are not available yet.";
+    card.appendChild(line);
+    return card;
+  }
+
+  const row = document.createElement("div");
+  row.className = "privacy";
+  const modelPath = document.createElement("div");
+  modelPath.textContent = `Model directory: ${readiness.model_dir}`;
+  const writable = document.createElement("div");
+  writable.textContent = `Model directory writable: ${readiness.model_dir_writable ? "yes" : "no"}`;
+  const hotkey = document.createElement("div");
+  hotkey.textContent = `Current hotkey valid: ${readiness.hotkey_valid ? "yes" : "no"}`;
+  const activeModel = document.createElement("div");
+  activeModel.textContent = `Current model: ${readiness.current_model} (${readiness.current_model_installed ? "installed" : "not installed"})`;
+  const access = document.createElement("div");
+  if (!readiness.accessibility_supported) {
+    access.textContent = "Accessibility: unsupported on this platform";
+  } else {
+    access.textContent = `Accessibility trusted: ${readiness.accessibility_trusted ? "yes" : "no"}`;
+  }
+  const downloading = document.createElement("div");
+  downloading.textContent = `Model download active: ${readiness.active_download ? "yes" : "no"}`;
+  const storage = document.createElement("div");
+  storage.textContent = `Model store: ${readiness.model_store_file_count} files, ${fmtBytes(readiness.model_store_bytes)}`;
+  row.append(modelPath, writable, storage, hotkey, activeModel, access, downloading);
+  card.appendChild(row);
   return card;
 }
 

@@ -7,6 +7,7 @@
 use crate::error::{Result, SpielError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::{io, io::Write, path::Component, time};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -84,6 +85,8 @@ impl Config {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        validate_config_path(path)?;
+
         match std::fs::read_to_string(path) {
             Ok(s) => {
                 let cfg: Config = serde_json::from_str(&s)
@@ -101,15 +104,25 @@ impl Config {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        validate_config_path(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| SpielError::Config(format!("Failed to create config dir: {e}")))?;
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| SpielError::Config(format!("Failed to serialize settings: {e}")))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)
+        let tmp = unique_temp_path(path, "json.tmp");
+        let mut out = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| SpielError::Config(format!("Failed to create temp settings: {e}")))?;
+        out.write_all(json.as_bytes())
             .map_err(|e| SpielError::Config(format!("Failed to write temp settings: {e}")))?;
+        out.sync_all().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            SpielError::Config(format!("Failed to flush temp settings: {e}"))
+        })?;
         #[cfg(windows)]
         if path.exists() {
             let _ = std::fs::remove_file(path);
@@ -121,6 +134,76 @@ impl Config {
         set_config_permissions(path)?;
         Ok(())
     }
+}
+
+fn validate_config_path(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| SpielError::Config("settings path must have a parent directory".into()))?;
+
+    let mut cursor = PathBuf::new();
+    for c in parent.components() {
+        if let Component::RootDir | Component::CurDir = c {
+            cursor.push(c.as_os_str());
+            continue;
+        }
+
+        cursor.push(c.as_os_str());
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(SpielError::Config(format!(
+                        "refusing settings path with symlink component: {path:?}"
+                    )));
+                }
+            }
+            Err(e) => {
+                if e.kind() != io::ErrorKind::NotFound {
+                    return Err(SpielError::Config(format!(
+                        "cannot check config path component {cursor:?}: {e}"
+                    )));
+                }
+                // Stop at the first missing component. We validate only components that
+                // already exist, then create the tail directories atomically.
+                break;
+            }
+        }
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(SpielError::Config(format!(
+                    "settings file path is a symlink: {path:?}"
+                )));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(SpielError::Config(format!(
+                "cannot check settings path {path:?}: {e}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn unique_temp_path(path: &Path, suffix: &str) -> PathBuf {
+    let pid = std::process::id();
+    let nanos = time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let base_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "settings.json".to_string());
+    path.with_file_name(format!(
+        ".{}.{}.{suffix}",
+        base_name,
+        nanos.saturating_add(pid as u128)
+    ))
 }
 
 fn set_config_permissions(path: &Path) -> Result<()> {
@@ -222,5 +305,34 @@ mod tests {
         .validated()
         .unwrap();
         assert_eq!(cfg2.transcription_threads, 8);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_rejects_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir();
+        let cfg_file = base.join(format!("spiel_config_{}.json", std::process::id()));
+        let target = base.join(format!("spiel_config_target_{}.txt", std::process::id()));
+        std::fs::write(&target, b"{}").ok();
+        let _ = std::fs::remove_file(&cfg_file);
+        symlink(&target, &cfg_file).unwrap();
+
+        let err = validate_config_path(&cfg_file).expect_err("symlink should be rejected");
+        assert!(err.to_string().contains("symlink"));
+
+        let _ = std::fs::remove_file(&cfg_file);
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn unique_temp_path_has_safe_file_name() {
+        let base = std::env::temp_dir().join("spiel-config-test");
+        let config_path = base.join("config.json");
+        let temp = unique_temp_path(&config_path, "json.tmp");
+        let name = temp.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".config.json"));
+        assert!(!name.contains('"'));
     }
 }

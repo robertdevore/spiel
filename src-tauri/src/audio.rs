@@ -38,7 +38,7 @@ impl Capture {
 /// Controls one in-progress recording. Dropping it stops the capture thread.
 pub struct Recorder {
     stop_tx: mpsc::Sender<()>,
-    result_rx: mpsc::Receiver<Vec<f32>>,
+    result_rx: mpsc::Receiver<crate::error::Result<Vec<f32>>>,
     in_rate: u32,
     /// Captured live so the UI can show an elapsed timer.
     elapsed_ms: Arc<Mutex<u64>>,
@@ -61,7 +61,8 @@ impl Recorder {
         let raw = self
             .result_rx
             .recv_timeout(std::time::Duration::from_secs(3))
-            .map_err(|_| SpielError::Audio("recording thread did not return in time".into()))?;
+            .map_err(|_| SpielError::Audio("recording thread did not return in time".into()))?
+            .map_err(|err| SpielError::Audio(err.to_string()))?;
 
         let samples = if self.in_rate == TARGET_SAMPLE_RATE {
             raw
@@ -95,14 +96,15 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
     let config: cpal::StreamConfig = supported.into();
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let (result_tx, result_rx) = mpsc::channel::<Vec<f32>>();
+    let (result_tx, result_rx) = mpsc::channel::<crate::error::Result<Vec<f32>>>();
     let started = Instant::now();
     let elapsed_ms = Arc::new(Mutex::new(0u64));
     let elapsed_clone = Arc::clone(&elapsed_ms);
 
-    // Whisper consumes 16 kHz; cap by target sample frames so memory is bounded by model
-    // input characteristics rather than device input rate.
-    let max_samples = (TARGET_SAMPLE_RATE as usize) * (max_seconds as usize);
+    // Time-bound capture by input sample rate for real-time behavior.
+    // Output is still trimmed to the same wall-clock duration after resampling.
+    let max_input_samples = (in_rate as usize) * (max_seconds as usize);
+    let max_output_samples = (TARGET_SAMPLE_RATE as usize) * (max_seconds as usize);
     let need_downsample = in_rate > TARGET_SAMPLE_RATE;
     let downsample_ratio = if need_downsample {
         Some(in_rate as f64 / TARGET_SAMPLE_RATE as f64)
@@ -115,7 +117,8 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
     })));
 
     std::thread::spawn(move || {
-        let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(max_samples)));
+        let buffer: Arc<Mutex<Vec<f32>>> =
+            Arc::new(Mutex::new(Vec::with_capacity(max_input_samples)));
         let cb_buffer = Arc::clone(&buffer);
 
         let err_fn = |e| eprintln!("[spiel] audio stream error: {e}");
@@ -127,7 +130,7 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
             sample_format,
             StreamBuildContext {
                 buffer: cb_buffer,
-                max_samples,
+                max_samples: max_input_samples,
                 channels: in_channels,
                 downsample_state,
                 downsample_ratio,
@@ -137,14 +140,18 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[spiel] failed to build input stream: {e}");
-                let _ = result_tx.send(Vec::new());
+                let _ = result_tx.send(Err(SpielError::Audio(format!(
+                    "failed to build input stream: {e}"
+                ))));
                 return;
             }
         };
 
         if let Err(e) = stream.play() {
             eprintln!("[spiel] failed to start stream: {e}");
-            let _ = result_tx.send(Vec::new());
+            let _ = result_tx.send(Err(SpielError::Audio(format!(
+                "failed to start input stream: {e}"
+            ))));
             return;
         }
 
@@ -160,13 +167,16 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
                 break;
             }
             // Hard cap reached: stop on our own.
-            if buffer.lock().unwrap().len() >= max_samples {
+            if buffer.lock().unwrap().len() >= max_input_samples {
                 break;
             }
         }
 
-        let collected = std::mem::take(&mut *buffer.lock().unwrap());
-        let _ = result_tx.send(collected);
+        let mut collected = std::mem::take(&mut *buffer.lock().unwrap());
+        if collected.len() > max_output_samples {
+            collected.truncate(max_output_samples);
+        }
+        let _ = result_tx.send(Ok(collected));
     });
 
     Ok(Recorder {
@@ -289,22 +299,31 @@ struct StreamBuildContext {
     downsample_ratio: Option<f64>,
 }
 
-/// Resample mono audio to `out_rate`. Downsampling averages each source window, which
-/// doubles as a crude anti-alias low-pass — adequate for speech going into Whisper.
+/// Resample mono audio to `out_rate` using linear interpolation.
+/// This keeps timing stable both when up-sampling and down-sampling.
 fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if in_rate == out_rate || input.is_empty() {
         return input.to_vec();
     }
-    let ratio = in_rate as f64 / out_rate as f64;
-    let out_len = (input.len() as f64 / ratio).floor() as usize;
+
+    let out_len = ((input.len() as f64 * out_rate as f64) / in_rate as f64).round() as usize;
+    if out_len == 0 {
+        return Vec::new();
+    }
+
+    let scale = in_rate as f64 / out_rate as f64;
     let mut out = Vec::with_capacity(out_len);
+    let max = input.len() - 1;
     for i in 0..out_len {
-        let start = (i as f64 * ratio) as usize;
-        let end = (((i + 1) as f64 * ratio) as usize)
-            .min(input.len())
-            .max(start + 1);
-        let window = &input[start..end];
-        out.push(window.iter().sum::<f32>() / window.len() as f32);
+        let sample_pos = i as f64 * scale;
+        let left = sample_pos.floor() as usize;
+        let right = (left + 1).min(max);
+        if left == right {
+            out.push(input[left]);
+        } else {
+            let frac = (sample_pos - left as f64) as f32;
+            out.push(input[left] + (input[right] - input[left]) * frac);
+        }
     }
     out
 }
@@ -312,6 +331,26 @@ fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downsample_or_upsample_roughly_preserves_duration() {
+        // At lower sample rates, output length should stay near the target frame budget.
+        let low_rate_input: Vec<f32> = (0..(8_000 * 10)).map(|i| (i as f32).sin()).collect();
+        let low_rate_output = resample_linear(&low_rate_input, 8_000, TARGET_SAMPLE_RATE);
+        assert!((low_rate_output.len() as i64 - (16_000 * 10)).abs() <= 1);
+
+        // At higher rates, output should not exceed the target-frame duration.
+        let high_rate_input: Vec<f32> = (0..(48_000 * 10)).map(|i| (i as f32).cos()).collect();
+        let high_rate_output = resample_linear(&high_rate_input, 48_000, TARGET_SAMPLE_RATE);
+        assert!(high_rate_output.len() <= (16_000 * 10) + 1);
+    }
+
+    #[test]
+    fn output_is_clamped_to_target_floor_for_non_divisible_rates() {
+        let input: Vec<f32> = (0..(7_999 * 10)).map(|i| (i as f32).sin()).collect();
+        let output = resample_linear(&input, 7_999, TARGET_SAMPLE_RATE);
+        assert!(output.len() <= 16_000 * 10 + 1);
+    }
 
     #[test]
     fn downmix_averages_stereo() {
@@ -347,6 +386,17 @@ mod tests {
     fn resample_noop_when_rates_match() {
         let input = vec![0.1, 0.2, 0.3];
         assert_eq!(resample_linear(&input, 16_000, 16_000), input);
+    }
+
+    #[test]
+    fn resample_upsample_halves_rate() {
+        let input = vec![0.0, 1.0];
+        let out = resample_linear(&input, 8_000, 16_000);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0], 0.0);
+        assert!((out[1] - 0.5).abs() < 0.0001);
+        assert_eq!(out[2], 1.0);
+        assert_eq!(out[3], 1.0);
     }
 
     #[test]

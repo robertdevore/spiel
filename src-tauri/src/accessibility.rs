@@ -24,15 +24,25 @@ pub fn open_settings_pane() {
         .spawn();
 }
 
+#[cfg(target_os = "macos")]
+pub fn is_supported() -> bool {
+    true
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn is_trusted() -> bool {
-    true
+    false
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn prompt_if_needed() -> bool {
-    true
+    false
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn open_settings_pane() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_supported() -> bool {
+    false
+}

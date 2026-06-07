@@ -142,6 +142,7 @@ pub struct StatusSnapshot {
     pub model_id: String,
     pub model_installed: bool,
     pub accessibility_trusted: bool,
+    pub accessibility_supported: bool,
 }
 
 impl AppState {
@@ -194,7 +195,9 @@ impl AppState {
             recording_elapsed_ms: elapsed,
             model_id: config.model.clone(),
             model_installed: self.model_install_info(&config.model).is_installed(),
-            accessibility_trusted: crate::accessibility::is_trusted(),
+            accessibility_trusted: crate::accessibility::is_supported()
+                && crate::accessibility::is_trusted(),
+            accessibility_supported: crate::accessibility::is_supported(),
         }
     }
 

@@ -48,6 +48,11 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
         return Ok(outcome);
     }
 
+    if !accessibility::is_supported() {
+        outcome.clipboard_only = true;
+        return Ok(outcome);
+    }
+
     if !accessibility::is_trusted() {
         // Don't paste blindly (the keystrokes would no-op); keep text on the clipboard.
         outcome.clipboard_only = true;

@@ -12,9 +12,10 @@
 use crate::error::{Result, SpielError};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::io::Read;
+use std::fs::OpenOptions;
+use std::io::{self, Read};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// GGML container magic. whisper.cpp writes the u32 `0x67676d6c` ("ggml"), which lands
 /// on disk little-endian as the bytes `6c 6d 67 67`.
@@ -144,8 +145,22 @@ pub const REGISTRY: &[ModelSpec] = &[
     },
 ];
 
+const DEFAULT_PART_CLEANUP_MS: u64 = 24 * 60 * 60 * 1000;
+
 pub fn spec(id: &str) -> Option<&'static ModelSpec> {
     REGISTRY.iter().find(|m| m.id == id)
+}
+
+/// Read model cleanup duration from an env var, used for stale `.part` file expiration.
+pub fn parse_part_cleanup_ms(raw: Option<&str>, default_ms: u64) -> Duration {
+    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(default_ms))
+}
+
+/// Default duration for stale `.part` cleanup when the env var is unset or invalid.
+pub fn default_part_cleanup_duration() -> Duration {
+    Duration::from_millis(DEFAULT_PART_CLEANUP_MS)
 }
 
 pub fn is_language_supported(spec: &ModelSpec, language: &str) -> bool {
@@ -267,6 +282,56 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
     }
 }
 
+/// Remove stale `.part` files from interrupted downloads.
+/// Returns how many stale files were removed.
+pub fn cleanup_stale_part_files(model_dir: &Path, older_than: Duration) -> usize {
+    let read_dir = match std::fs::read_dir(model_dir) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+
+    let mut removed = 0usize;
+    for entry in read_dir.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".part") {
+            continue;
+        }
+
+        let metadata = match entry.path().symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+
+        if older_than.is_zero() {
+            if std::fs::remove_file(&path).is_ok() {
+                removed = removed.saturating_add(1);
+            }
+            continue;
+        }
+
+        let is_stale = metadata.modified().ok().and_then(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .ok()
+                .map(|age| age > older_than)
+        });
+        if is_stale.unwrap_or(false) && std::fs::remove_file(&path).is_ok() {
+            removed = removed.saturating_add(1);
+        }
+    }
+
+    removed
+}
+
 /// Download `spec` to `model_dir`, calling `on_progress(downloaded, total)` as it goes.
 ///
 /// `total` is `None` if the server doesn't send a content length. Cancellation is
@@ -291,10 +356,6 @@ pub fn download(
     is_safe_model_path(&part_path, "temporary model file")
         .and_then(|_| is_safe_model_path(&final_path, "target model file"))?;
 
-    if part_path.exists() {
-        let _ = std::fs::remove_file(&part_path);
-    }
-
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_millis(connect_timeout))
         .timeout(Duration::from_millis(request_timeout))
@@ -315,8 +376,7 @@ pub fn download(
     }
 
     let total = resp.content_length();
-    let mut file = std::fs::File::create(&part_path)
-        .map_err(|e| SpielError::Download(format!("cannot create {part_path:?}: {e}")))?;
+    let mut file = open_part_file(&part_path)?;
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 64 * 1024];
@@ -427,6 +487,27 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+fn open_part_file(path: &Path) -> Result<std::fs::File> {
+    is_safe_model_path(path, "temporary model file")
+        .map_err(|e| SpielError::Download(format!("unsafe temporary model file {path:?}: {e}")))?;
+
+    let mut attempts = 0;
+    loop {
+        match OpenOptions::new().create_new(true).write(true).open(path) {
+            Ok(file) => return Ok(file),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists && attempts < 1 => {
+                let _ = std::fs::remove_file(path);
+                attempts += 1;
+            }
+            Err(err) => {
+                return Err(SpielError::Download(format!(
+                    "cannot create temporary model file {path:?}: {err}"
+                )))
+            }
+        }
+    }
+}
+
 fn ensure_complete_download(total: Option<u64>, downloaded: u64) -> Result<()> {
     if let Some(expected) = total {
         if downloaded != expected {
@@ -438,7 +519,7 @@ fn ensure_complete_download(total: Option<u64>, downloaded: u64) -> Result<()> {
     Ok(())
 }
 
-fn is_safe_model_path(path: &Path, label: &str) -> Result<()> {
+pub fn is_safe_model_path(path: &Path, label: &str) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
@@ -543,6 +624,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_part_cleanup_ms_uses_default_on_missing_or_invalid() {
+        assert_eq!(parse_part_cleanup_ms(None, 100), Duration::from_millis(100));
+        assert_eq!(
+            parse_part_cleanup_ms(Some("not-a-number"), 100),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            parse_part_cleanup_ms(Some("0"), 100),
+            Duration::from_millis(0)
+        );
+    }
+
+    #[test]
     fn safe_model_path_rejects_symlink_or_errors() {
         let temp = std::env::temp_dir().join(format!(
             "spiel_model_safe_path_check_{}",
@@ -578,6 +672,21 @@ mod tests {
         assert!(info.bytes > 0);
 
         let _ = std::fs::remove_file(&part_path);
+    }
+
+    #[test]
+    fn stale_partial_downloads_cleanup_removes_part_files() {
+        let dir = std::env::temp_dir().join("spiel_model_partial_cleanup");
+        let _ = std::fs::create_dir_all(&dir);
+        let old_part = dir.join("obsolete.bin.part");
+        let keep_part = dir.join("pending.bin.part");
+        let _ = std::fs::write(&old_part, b"old");
+        let _ = std::fs::write(&keep_part, b"new");
+
+        let removed = cleanup_stale_part_files(&dir, Duration::ZERO);
+        assert_eq!(removed, 2);
+        assert!(!old_part.exists());
+        assert!(!keep_part.exists());
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::error::{to_command_error, Result as SpielResult};
 use crate::state::{AppState, PerfSnapshot, StatusSnapshot};
 use crate::{accessibility, model};
 use serde::Serialize;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -35,6 +36,106 @@ struct ModelDone {
     model_id: String,
     ok: bool,
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReadinessSnapshot {
+    pub model_dir: String,
+    pub model_dir_writable: bool,
+    pub current_model: String,
+    pub current_model_installed: bool,
+    pub model_store_bytes: u64,
+    pub model_store_file_count: usize,
+    pub hotkey_valid: bool,
+    pub accessibility_supported: bool,
+    pub accessibility_trusted: bool,
+    pub active_download: bool,
+}
+
+#[tauri::command]
+pub fn get_readiness(state: State<AppState>) -> ReadinessSnapshot {
+    let config = state.config.lock().unwrap().clone();
+    let current_model = config.model.clone();
+    let model_dir = state.paths.model_dir.clone();
+    let model_dir_writable = probe_model_dir_writable(&model_dir);
+    let (model_store_bytes, model_store_file_count) = summarize_model_dir(&model_dir);
+
+    ReadinessSnapshot {
+        model_dir: model_dir.to_string_lossy().to_string(),
+        model_dir_writable,
+        current_model,
+        current_model_installed: state.model_install_info(&config.model).is_installed(),
+        model_store_bytes,
+        model_store_file_count,
+        hotkey_valid: crate::validate_hotkey(&config.hotkey).is_ok(),
+        accessibility_supported: crate::accessibility::is_supported(),
+        accessibility_trusted: crate::accessibility::is_supported()
+            && crate::accessibility::is_trusted(),
+        active_download: state.download.lock().unwrap().active,
+    }
+}
+
+fn probe_model_dir_writable(model_dir: &std::path::Path) -> bool {
+    if model::is_safe_model_path(model_dir, "model directory").is_err() {
+        return false;
+    }
+    let probe_path = model_dir.join(format!(
+        ".spiel-write-test.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let write_result = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe_path)
+        .and_then(|mut f| f.write_all(b"1"));
+
+    let was_writable = write_result.is_ok();
+    let _ = std::fs::remove_file(&probe_path);
+    was_writable
+}
+
+fn summarize_model_dir(model_dir: &std::path::Path) -> (u64, usize) {
+    let mut total_bytes: u64 = 0;
+    let mut file_count: usize = 0;
+
+    let entries = match std::fs::read_dir(model_dir) {
+        Ok(entries) => entries,
+        Err(_) => return (0, 0),
+    };
+
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if !(name.ends_with(".bin") || name.ends_with(".part")) {
+            continue;
+        }
+
+        let metadata = match entry.file_type() {
+            Ok(ft) if ft.is_symlink() => continue,
+            Ok(ft) if !ft.is_file() => continue,
+            _ => match entry.path().metadata() {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            },
+        };
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        file_count = file_count.saturating_add(1);
+        total_bytes = total_bytes.saturating_add(metadata.len());
+    }
+
+    (total_bytes, file_count)
 }
 
 #[tauri::command]
@@ -159,6 +260,9 @@ pub fn download_model(
     let Some(spec) = model::spec(&model_id) else {
         return Err(format!("Unknown model '{model_id}'."));
     };
+    let partial_ttl =
+        model::parse_part_cleanup_ms(std::env::var("SPIEL_PART_CLEANUP_MS").ok().as_deref(), 0);
+    model::cleanup_stale_part_files(&state.paths.model_dir, partial_ttl);
     if model::is_installed(&state.paths.model_dir, &model_id) {
         return Err(format!("Model '{model_id}' is already installed."));
     }
@@ -325,6 +429,8 @@ mod tests {
     use super::*;
     use crate::error::SpielError;
     use std::cell::RefCell;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn registers_new_hotkey_then_persists() {
@@ -417,5 +523,67 @@ mod tests {
             calls.into_inner(),
             vec!["register:Cmd+Shift+K", "register:Cmd+Alt+D"]
         );
+    }
+
+    #[test]
+    fn summarize_model_dir_counts_model_files_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "spiel-readiness-summary-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("ggml-tiny.bin"), vec![0_u8; 1024]).unwrap();
+        fs::write(dir.join("ggml-tiny.bin.part"), vec![0_u8; 2048]).unwrap();
+
+        let (bytes, files) = summarize_model_dir(&dir);
+        assert_eq!(files, 2);
+        assert_eq!(bytes, 3072);
+
+        fs::remove_file(dir.join("ggml-tiny.bin")).unwrap();
+        fs::remove_file(dir.join("ggml-tiny.bin.part")).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summarize_model_dir_ignores_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "spiel-readiness-summary-symlink-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let target = std::env::temp_dir().join(format!(
+            "spiel-readiness-target-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&target, vec![0_u8; 128]).unwrap();
+        let link = dir.join("ggml-small.bin");
+        symlink(&target, &link).unwrap();
+
+        let (bytes, files) = summarize_model_dir(&dir);
+        assert_eq!(bytes, 0);
+        assert_eq!(files, 0);
+
+        fs::remove_file(&target).unwrap();
+        fs::remove_file(link).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
