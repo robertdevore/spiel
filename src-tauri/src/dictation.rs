@@ -309,6 +309,14 @@ pub fn clear_model_cache(state: &AppState) {
     *state.transcriber.lock().unwrap() = None;
 }
 
+pub fn warm_up_current_model(state: &AppState, keep_loaded: bool) -> crate::error::Result<()> {
+    let _ = ensure_transcriber(state)?;
+    if !keep_loaded {
+        clear_model_cache(state);
+    }
+    Ok(())
+}
+
 pub fn show_settings_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();

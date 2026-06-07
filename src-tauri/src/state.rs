@@ -96,21 +96,43 @@ pub struct PerfSample {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DownloadPerfSample {
+    pub wall_time_ms: u64,
+    pub total_ms: u64,
+    pub downloaded_bytes: u64,
+    pub expected_bytes: Option<u64>,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PerfSnapshot {
     pub enabled: bool,
     pub budget_ms: u64,
     pub sample_count: usize,
     pub average_total_ms: u64,
+    pub p50_total_ms: u64,
     pub p95_total_ms: u64,
     pub max_total_ms: u64,
     pub over_budget_count: usize,
+    pub average_capture_ms: u64,
+    pub average_transcribe_ms: u64,
+    pub average_insert_ms: u64,
+    pub pasted_count: usize,
+    pub clipboard_only_count: usize,
+    pub insert_error_count: usize,
+    pub download_sample_count: usize,
+    pub average_download_ms: u64,
+    pub p95_download_ms: u64,
+    pub max_download_ms: u64,
     pub last: Option<PerfSample>,
+    pub last_download: Option<DownloadPerfSample>,
 }
 
 pub struct PerfState {
     enabled: bool,
     budget_ms: u64,
     samples: VecDeque<PerfSample>,
+    download_samples: VecDeque<DownloadPerfSample>,
 }
 
 impl PerfState {
@@ -128,6 +150,7 @@ impl PerfState {
             enabled,
             budget_ms,
             samples: VecDeque::with_capacity(128),
+            download_samples: VecDeque::with_capacity(64),
         }
     }
 }
@@ -215,35 +238,82 @@ impl AppState {
                 budget_ms: perf.budget_ms,
                 sample_count: 0,
                 average_total_ms: 0,
+                p50_total_ms: 0,
                 p95_total_ms: 0,
                 max_total_ms: 0,
                 over_budget_count: 0,
+                average_capture_ms: 0,
+                average_transcribe_ms: 0,
+                average_insert_ms: 0,
+                pasted_count: 0,
+                clipboard_only_count: 0,
+                insert_error_count: 0,
+                download_sample_count: perf.download_samples.len(),
+                average_download_ms: aggregate_avg_download_ms(&perf.download_samples),
+                p95_download_ms: aggregate_p95_download_ms(&perf.download_samples),
+                max_download_ms: aggregate_max_download_ms(&perf.download_samples),
                 last: None,
+                last_download: perf.download_samples.back().cloned(),
             };
         }
         let mut totals: Vec<u64> = perf.samples.iter().map(|s| s.total_ms).collect();
         totals.sort_unstable();
+        let p50_idx = totals.len().saturating_sub(1) / 2;
         let p95_idx = ((totals.len() as f64 * 0.95).ceil() as usize)
             .saturating_sub(1)
             .min(totals.len() - 1);
+        let p50 = totals[p50_idx];
         let p95 = totals[p95_idx];
         let sum: u64 = perf.samples.iter().map(|s| s.total_ms).sum();
         let avg = sum / perf.samples.len() as u64;
         let max = totals.last().copied().unwrap_or(0);
+        let avg_capture =
+            perf.samples.iter().map(|s| s.capture_ms).sum::<u64>() / perf.samples.len() as u64;
+        let avg_transcribe =
+            perf.samples.iter().map(|s| s.transcribe_ms).sum::<u64>() / perf.samples.len() as u64;
+        let avg_insert =
+            perf.samples.iter().map(|s| s.insert_ms).sum::<u64>() / perf.samples.len() as u64;
         let over_budget = perf
             .samples
             .iter()
             .filter(|s| s.total_ms > perf.budget_ms)
+            .count();
+        let pasted_count = perf
+            .samples
+            .iter()
+            .filter(|s| s.outcome == "pasted")
+            .count();
+        let clipboard_only_count = perf
+            .samples
+            .iter()
+            .filter(|s| s.outcome == "clipboard_only")
+            .count();
+        let insert_error_count = perf
+            .samples
+            .iter()
+            .filter(|s| s.outcome == "insert_error")
             .count();
         PerfSnapshot {
             enabled: perf.enabled,
             budget_ms: perf.budget_ms,
             sample_count: perf.samples.len(),
             average_total_ms: avg,
+            p50_total_ms: p50,
             p95_total_ms: p95,
             max_total_ms: max,
             over_budget_count: over_budget,
+            average_capture_ms: avg_capture,
+            average_transcribe_ms: avg_transcribe,
+            average_insert_ms: avg_insert,
+            pasted_count,
+            clipboard_only_count,
+            insert_error_count,
+            download_sample_count: perf.download_samples.len(),
+            average_download_ms: aggregate_avg_download_ms(&perf.download_samples),
+            p95_download_ms: aggregate_p95_download_ms(&perf.download_samples),
+            max_download_ms: aggregate_max_download_ms(&perf.download_samples),
             last: perf.samples.back().cloned(),
+            last_download: perf.download_samples.back().cloned(),
         }
     }
 
@@ -276,7 +346,49 @@ impl AppState {
         perf.samples.push_back(sample);
     }
 
-    pub fn clear_perf_samples(&self) {
-        self.perf.lock().unwrap().samples.clear();
+    pub fn record_download_sample(&self, mut sample: DownloadPerfSample) {
+        let mut perf = self.perf.lock().unwrap();
+        if !perf.enabled {
+            return;
+        }
+        if sample.wall_time_ms == 0 {
+            sample.wall_time_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+        }
+        if perf.download_samples.len() >= 64 {
+            perf.download_samples.pop_front();
+        }
+        perf.download_samples.push_back(sample);
     }
+
+    pub fn clear_perf_samples(&self) {
+        let mut perf = self.perf.lock().unwrap();
+        perf.samples.clear();
+        perf.download_samples.clear();
+    }
+}
+
+fn aggregate_avg_download_ms(samples: &VecDeque<DownloadPerfSample>) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    samples.iter().map(|s| s.total_ms).sum::<u64>() / samples.len() as u64
+}
+
+fn aggregate_p95_download_ms(samples: &VecDeque<DownloadPerfSample>) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut totals: Vec<u64> = samples.iter().map(|s| s.total_ms).collect();
+    totals.sort_unstable();
+    let idx = ((totals.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(totals.len() - 1);
+    totals[idx]
+}
+
+fn aggregate_max_download_ms(samples: &VecDeque<DownloadPerfSample>) -> u64 {
+    samples.iter().map(|s| s.total_ms).max().unwrap_or(0)
 }

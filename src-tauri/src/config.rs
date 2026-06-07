@@ -136,7 +136,7 @@ impl Config {
     }
 }
 
-fn validate_config_path(path: &Path) -> Result<()> {
+pub fn validate_config_path(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| SpielError::Config("settings path must have a parent directory".into()))?;

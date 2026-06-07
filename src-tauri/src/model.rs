@@ -57,6 +57,19 @@ pub struct InstallInfo {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CleanupReport {
+    pub removed_partial_files: usize,
+    pub removed_sidecar_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadSummary {
+    pub downloaded_bytes: u64,
+    pub expected_bytes: Option<u64>,
+    pub checksum_source: String,
+}
+
 impl InstallInfo {
     pub fn as_label(&self) -> &'static str {
         match self.status {
@@ -210,6 +223,23 @@ pub fn normalize_language_hint(language: &str) -> String {
     }
 }
 
+pub fn recommended_model_for_language(language: &str) -> (&'static str, &'static str) {
+    match normalize_language_hint(language).as_str() {
+        "en" => (
+            "base.en",
+            "English dictation is fastest and most memory-efficient on the English-only base model.",
+        ),
+        "auto" => (
+            "base",
+            "Auto-detect works best with a multilingual model so mixed-language speech stays supported.",
+        ),
+        _ => (
+            "base",
+            "Non-English dictation needs a multilingual model for reliable transcription.",
+        ),
+    }
+}
+
 /// Is the model for `id` present and structurally valid on disk?
 pub fn is_installed(model_dir: &Path, id: &str) -> bool {
     inspect_install(model_dir, id).is_installed()
@@ -311,19 +341,26 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
 
 /// Remove stale `.part` files from interrupted downloads.
 /// Returns how many stale files were removed.
+#[cfg(test)]
 pub fn cleanup_stale_part_files(model_dir: &Path, older_than: Duration) -> usize {
+    cleanup_stale_model_artifacts(model_dir, older_than).removed_partial_files
+}
+
+pub fn cleanup_stale_model_artifacts(model_dir: &Path, older_than: Duration) -> CleanupReport {
     let read_dir = match std::fs::read_dir(model_dir) {
         Ok(entries) => entries,
-        Err(_) => return 0,
+        Err(_) => return CleanupReport::default(),
     };
 
-    let mut removed = 0usize;
+    let mut report = CleanupReport::default();
     for entry in read_dir.filter_map(std::result::Result::ok) {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !name.ends_with(".part") {
+        let is_part = name.ends_with(".part");
+        let is_sidecar = name.ends_with(".sha256");
+        if !is_part && !is_sidecar {
             continue;
         }
 
@@ -340,7 +377,11 @@ pub fn cleanup_stale_part_files(model_dir: &Path, older_than: Duration) -> usize
 
         if older_than.is_zero() {
             if std::fs::remove_file(&path).is_ok() {
-                removed = removed.saturating_add(1);
+                if is_part {
+                    report.removed_partial_files = report.removed_partial_files.saturating_add(1);
+                } else {
+                    report.removed_sidecar_files = report.removed_sidecar_files.saturating_add(1);
+                }
             }
             continue;
         }
@@ -351,12 +392,21 @@ pub fn cleanup_stale_part_files(model_dir: &Path, older_than: Duration) -> usize
                 .ok()
                 .map(|age| age > older_than)
         });
-        if is_stale.unwrap_or(false) && std::fs::remove_file(&path).is_ok() {
-            removed = removed.saturating_add(1);
+        let orphan_sidecar = is_sidecar
+            && match sidecar_target_path(&path) {
+                Some(target) => !target.exists(),
+                None => true,
+            };
+        if (is_stale.unwrap_or(false) || orphan_sidecar) && std::fs::remove_file(&path).is_ok() {
+            if is_part {
+                report.removed_partial_files = report.removed_partial_files.saturating_add(1);
+            } else {
+                report.removed_sidecar_files = report.removed_sidecar_files.saturating_add(1);
+            }
         }
     }
 
-    removed
+    report
 }
 
 /// Download `spec` to `model_dir`, calling `on_progress(downloaded, total)` as it goes.
@@ -368,7 +418,7 @@ pub fn download(
     spec: &ModelSpec,
     mut on_progress: impl FnMut(u64, Option<u64>),
     should_cancel: impl Fn() -> bool,
-) -> Result<()> {
+) -> Result<DownloadSummary> {
     std::fs::create_dir_all(model_dir)
         .map_err(|e| SpielError::Download(format!("cannot create model dir: {e}")))?;
 
@@ -388,6 +438,7 @@ pub fn download(
         .timeout(Duration::from_millis(request_timeout))
         .build()
         .map_err(|e| SpielError::Download(e.to_string()))?;
+    let resolved_checksum = resolve_download_checksum(&client, spec)?;
 
     let max_retries = load_download_retries("SPIEL_DOWNLOAD_RETRIES", 2);
     let base_backoff_ms = load_download_backoff_ms("SPIEL_DOWNLOAD_RETRY_BACKOFF_MS", 250);
@@ -404,11 +455,12 @@ pub fn download(
             spec,
             &part_path,
             &final_path,
+            resolved_checksum.as_deref(),
             &mut on_progress,
             &should_cancel,
         );
         match downloaded {
-            Ok(()) => return Ok(()),
+            Ok(summary) => return Ok(summary),
             Err(err) if is_download_cancelled(&err) => return Err(err),
             Err(_err) if attempt < max_retries => {
                 attempt = attempt.saturating_add(1);
@@ -425,9 +477,10 @@ fn download_once(
     spec: &ModelSpec,
     part_path: &Path,
     final_path: &Path,
+    expected_checksum: Option<&str>,
     on_progress: &mut impl FnMut(u64, Option<u64>),
     should_cancel: &impl Fn() -> bool,
-) -> Result<()> {
+) -> Result<DownloadSummary> {
     let mut resp = client
         .get(spec.url)
         .send()
@@ -482,20 +535,24 @@ fn download_once(
         return Err(e);
     }
 
-    validate_file(part_path, spec).inspect_err(|_| {
+    validate_file_with_checksum(part_path, spec, expected_checksum).inspect_err(|_| {
         let _ = std::fs::remove_file(part_path);
     })?;
 
     std::fs::rename(part_path, final_path)
         .map_err(|e| SpielError::Download(format!("could not finalize model: {e}")))?;
-    Ok(())
+    Ok(DownloadSummary {
+        downloaded_bytes: downloaded,
+        expected_bytes: total,
+        checksum_source: checksum_source_label(spec, expected_checksum).to_string(),
+    })
 }
 
 /// Structural validation independent of any pinned hash: header magic + plausible size.
 fn validate_model_file(path: &Path, spec: &ModelSpec) -> Result<u64> {
     let mut f = std::fs::File::open(path).map_err(|_| SpielError::ModelMissing)?;
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    validate_model_file_with_open_handle(&mut f, spec, path, len)
+    validate_model_file_with_open_handle(&mut f, spec, path, len, None)
 }
 
 fn validate_model_file_with_open_handle(
@@ -503,6 +560,7 @@ fn validate_model_file_with_open_handle(
     spec: &ModelSpec,
     path: &Path,
     len: u64,
+    checksum_override: Option<&str>,
 ) -> Result<u64> {
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)
@@ -520,7 +578,7 @@ fn validate_model_file_with_open_handle(
         )));
     }
 
-    if let Some(expected) = expected_checksum(path, spec)? {
+    if let Some(expected) = expected_checksum(path, spec, checksum_override)? {
         f.seek(SeekFrom::Start(0)).map_err(|_| {
             SpielError::Model(format!(
                 "failed to rewind model file for checksum: {path:?}"
@@ -551,7 +609,14 @@ fn validate_model_file_with_open_handle(
     Ok(len)
 }
 
-fn expected_checksum(path: &Path, spec: &ModelSpec) -> Result<Option<String>> {
+fn expected_checksum(
+    path: &Path,
+    spec: &ModelSpec,
+    checksum_override: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(checksum) = checksum_override {
+        return Ok(Some(checksum.to_lowercase()));
+    }
     if !spec.sha256.is_empty() {
         return Ok(Some(spec.sha256.to_lowercase()));
     }
@@ -586,9 +651,26 @@ fn sidecar_path(model_path: &Path) -> std::path::PathBuf {
     model_path.with_file_name(format!("{}.sha256", file_name.to_string_lossy()))
 }
 
+fn sidecar_target_path(sidecar_path: &Path) -> Option<std::path::PathBuf> {
+    let file_name = sidecar_path.file_name()?.to_str()?;
+    let target_name = file_name.strip_suffix(".sha256")?;
+    Some(sidecar_path.with_file_name(target_name))
+}
+
 /// Existing tests and older callsites still validate by path.
+#[cfg(test)]
 fn validate_file(path: &Path, spec: &ModelSpec) -> Result<()> {
     validate_model_file(path, spec).map(|_| ())
+}
+
+fn validate_file_with_checksum(
+    path: &Path,
+    spec: &ModelSpec,
+    expected_checksum: Option<&str>,
+) -> Result<()> {
+    let mut f = std::fs::File::open(path).map_err(|_| SpielError::ModelMissing)?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    validate_model_file_with_open_handle(&mut f, spec, path, len, expected_checksum).map(|_| ())
 }
 
 fn min_size_bytes(spec: &ModelSpec) -> u64 {
@@ -704,6 +786,119 @@ fn is_download_cancelled(err: &SpielError) -> bool {
     matches!(err, SpielError::Download(reason) if reason == "canceled")
 }
 
+pub fn classify_download_error(err: &SpielError) -> &'static str {
+    match err {
+        SpielError::Download(reason) if reason == "canceled" => "canceled",
+        SpielError::Download(reason) if reason.contains("checksum mismatch") => "checksum",
+        SpielError::Download(reason) if reason.contains("server returned") => "http_status",
+        SpielError::Download(reason) if reason.contains("could not reach") => "network",
+        SpielError::Download(reason) if reason.contains("download incomplete") => "incomplete",
+        SpielError::Download(reason) if reason.contains("unsafe") => "unsafe_path",
+        SpielError::Model(reason) if reason.contains("checksum mismatch") => "checksum",
+        SpielError::Model(_) => "validation",
+        _ => "unknown",
+    }
+}
+
+fn resolve_download_checksum(
+    client: &reqwest::blocking::Client,
+    spec: &ModelSpec,
+) -> Result<Option<String>> {
+    if !spec.sha256.is_empty() {
+        return Ok(Some(spec.sha256.to_lowercase()));
+    }
+
+    if let Some(checksum) = fetch_manifest_checksum(client, spec)? {
+        return Ok(Some(checksum));
+    }
+
+    fetch_remote_sidecar_checksum(client, spec)
+}
+
+fn fetch_manifest_checksum(
+    client: &reqwest::blocking::Client,
+    spec: &ModelSpec,
+) -> Result<Option<String>> {
+    let Some(url) = std::env::var("SPIEL_MODEL_MANIFEST_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let response = client
+        .get(url.trim())
+        .send()
+        .map_err(|e| SpielError::Download(format!("could not fetch model manifest: {e}")))?;
+    if !response.status().is_success() {
+        return Err(SpielError::Download(format!(
+            "model manifest returned {}",
+            response.status()
+        )));
+    }
+
+    let manifest_body = response
+        .text()
+        .map_err(|e| SpielError::Download(format!("could not read model manifest: {e}")))?;
+    let manifest =
+        serde_json::from_str::<std::collections::HashMap<String, String>>(&manifest_body)
+            .map_err(|e| SpielError::Download(format!("invalid model manifest JSON: {e}")))?;
+    let Some(raw_checksum) = manifest.get(spec.filename) else {
+        return Ok(None);
+    };
+    normalize_checksum_token(raw_checksum)
+        .map(Some)
+        .ok_or_else(|| SpielError::Download("model manifest contains invalid checksum".into()))
+}
+
+fn fetch_remote_sidecar_checksum(
+    client: &reqwest::blocking::Client,
+    spec: &ModelSpec,
+) -> Result<Option<String>> {
+    let response = match client.get(format!("{}.sha256", spec.url)).send() {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let body = response
+        .text()
+        .map_err(|e| SpielError::Download(format!("could not read checksum sidecar: {e}")))?;
+    let Some(token) = body.split_whitespace().next() else {
+        return Ok(None);
+    };
+    normalize_checksum_token(token)
+        .map(Some)
+        .ok_or_else(|| SpielError::Download("remote checksum sidecar is invalid".into()))
+}
+
+fn normalize_checksum_token(token: &str) -> Option<String> {
+    let trimmed = token.trim();
+    if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn checksum_source_label(spec: &ModelSpec, expected_checksum: Option<&str>) -> &'static str {
+    if !spec.sha256.is_empty() {
+        "registry"
+    } else if expected_checksum.is_some() {
+        if std::env::var("SPIEL_MODEL_MANIFEST_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+        {
+            "manifest"
+        } else {
+            "remote_sidecar"
+        }
+    } else {
+        "none"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +956,13 @@ mod tests {
         assert_eq!(normalize_language_hint("fr_CA"), "fr");
         assert_eq!(normalize_language_hint(""), "auto");
         assert_eq!(normalize_language_hint("zzZZ"), "auto");
+    }
+
+    #[test]
+    fn recommends_multilingual_models_for_non_english_languages() {
+        assert_eq!(recommended_model_for_language("en").0, "base.en");
+        assert_eq!(recommended_model_for_language("auto").0, "base");
+        assert_eq!(recommended_model_for_language("es").0, "base");
     }
 
     #[test]
@@ -859,6 +1061,18 @@ mod tests {
         assert_eq!(removed, 2);
         assert!(!old_part.exists());
         assert!(!keep_part.exists());
+    }
+
+    #[test]
+    fn stale_cleanup_removes_orphan_checksum_sidecars() {
+        let dir = std::env::temp_dir().join("spiel_model_sidecar_cleanup");
+        let _ = std::fs::create_dir_all(&dir);
+        let orphan_sidecar = dir.join("orphan.bin.sha256");
+        let _ = std::fs::write(&orphan_sidecar, "00".repeat(32));
+
+        let report = cleanup_stale_model_artifacts(&dir, Duration::from_secs(60));
+        assert_eq!(report.removed_sidecar_files, 1);
+        assert!(!orphan_sidecar.exists());
     }
 
     #[test]
@@ -981,5 +1195,21 @@ mod tests {
     #[test]
     fn allows_download_when_length_unknown() {
         assert!(ensure_complete_download(None, 90).is_ok());
+    }
+
+    #[test]
+    fn classifies_download_error_variants() {
+        assert_eq!(
+            classify_download_error(&SpielError::Download("canceled".into())),
+            "canceled"
+        );
+        assert_eq!(
+            classify_download_error(&SpielError::Download("could not reach host".into())),
+            "network"
+        );
+        assert_eq!(
+            classify_download_error(&SpielError::Model("checksum mismatch".into())),
+            "checksum"
+        );
     }
 }

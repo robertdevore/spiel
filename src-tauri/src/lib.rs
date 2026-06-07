@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -50,7 +50,7 @@ pub fn run() {
                 std::env::var("SPIEL_PART_CLEANUP_MS").ok().as_deref(),
                 model::default_part_cleanup_duration().as_millis() as u64,
             );
-            let _ = model::cleanup_stale_part_files(&model_dir, ttl);
+            let cleanup_report = model::cleanup_stale_model_artifacts(&model_dir, ttl);
             let paths = Paths {
                 config_file: config_dir.join("config.json"),
                 model_dir,
@@ -91,6 +91,9 @@ pub fn run() {
             }
 
             dictation::emit_status(&handle);
+            emit_startup_health(handle.clone(), cleanup_report.clone());
+            start_model_store_maintenance(handle.clone(), ttl);
+            start_optional_model_warmup(handle.clone());
 
             start_accessibility_poll(handle.clone());
             Ok(())
@@ -99,6 +102,7 @@ pub fn run() {
             commands::get_status,
             commands::get_config,
             commands::get_readiness,
+            commands::get_startup_health,
             commands::get_perf_snapshot,
             commands::clear_perf_samples,
             commands::update_config,
@@ -108,6 +112,7 @@ pub fn run() {
             commands::cancel_download,
             commands::toggle_dictation,
             commands::unload_model_from_memory,
+            commands::warm_up_model,
             commands::accessibility_status,
             commands::request_accessibility,
             commands::show_settings,
@@ -220,6 +225,56 @@ fn start_accessibility_poll(app: tauri::AppHandle) {
                 dictation::emit_status(&app);
             }
         }
+    });
+}
+
+fn emit_startup_health(app: tauri::AppHandle, cleanup_report: model::CleanupReport) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        if let Some(state) = app.try_state::<AppState>() {
+            let snapshot = commands::build_startup_health(&state, cleanup_report);
+            let _ = app.emit("startup-health", snapshot);
+        }
+    });
+}
+
+fn start_model_store_maintenance(app: tauri::AppHandle, older_than: std::time::Duration) {
+    let interval_ms = std::env::var("SPIEL_MAINTENANCE_POLL_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(60_000, 86_400_000))
+        .unwrap_or(15 * 60 * 1_000);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+        if let Some(state) = app.try_state::<AppState>() {
+            let report = model::cleanup_stale_model_artifacts(&state.paths.model_dir, older_than);
+            if report.removed_partial_files > 0 || report.removed_sidecar_files > 0 {
+                state.clear_model_install_cache();
+                let _ = app.emit(
+                    "startup-health",
+                    commands::build_startup_health(&state, report),
+                );
+            }
+        }
+    });
+}
+
+fn start_optional_model_warmup(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let config = state.config.lock().unwrap().clone();
+        let should_warm = config.keep_model_loaded
+            || std::env::var("SPIEL_WARMUP_ON_START")
+                .ok()
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(false);
+        if !should_warm {
+            return;
+        }
+        let _ = dictation::warm_up_current_model(&state, config.keep_model_loaded);
     });
 }
 

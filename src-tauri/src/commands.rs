@@ -4,7 +4,7 @@
 use crate::config::Config;
 use crate::dictation;
 use crate::error::{to_command_error, Result as SpielResult};
-use crate::state::{AppState, PerfSnapshot, StatusSnapshot};
+use crate::state::{AppState, DownloadPerfSample, PerfSnapshot, StatusSnapshot};
 use crate::{accessibility, model};
 use serde::Serialize;
 use std::io::Write;
@@ -38,20 +38,55 @@ struct ModelDone {
     model_id: String,
     ok: bool,
     error: Option<String>,
+    outcome: String,
+    downloaded_bytes: u64,
+    expected_bytes: Option<u64>,
+    checksum_source: String,
 }
 
 #[derive(Serialize)]
 pub struct ReadinessSnapshot {
     pub model_dir: String,
     pub model_dir_writable: bool,
+    pub config_file: String,
+    pub config_writable: bool,
+    pub config_path_safe: bool,
+    pub model_dir_safe: bool,
     pub current_model: String,
     pub current_model_installed: bool,
+    pub current_model_status: String,
+    pub current_model_reason: String,
     pub model_store_bytes: u64,
     pub model_store_file_count: usize,
     pub hotkey_valid: bool,
     pub accessibility_supported: bool,
     pub accessibility_trusted: bool,
     pub active_download: bool,
+    pub recommended_model: String,
+    pub recommended_model_reason: String,
+    pub setup_steps_remaining: usize,
+}
+
+#[derive(Clone, Serialize)]
+pub struct StartupHealthSnapshot {
+    pub checked_at_ms: u64,
+    pub config_file: String,
+    pub config_path_safe: bool,
+    pub config_writable: bool,
+    pub model_dir: String,
+    pub model_dir_safe: bool,
+    pub model_dir_writable: bool,
+    pub current_model: String,
+    pub current_model_status: String,
+    pub current_model_reason: String,
+    pub hotkey_valid: bool,
+    pub accessibility_supported: bool,
+    pub accessibility_trusted: bool,
+    pub recommended_model: String,
+    pub recommended_model_reason: String,
+    pub removed_partial_files: usize,
+    pub removed_sidecar_files: usize,
+    pub startup_warnings: Vec<String>,
 }
 
 #[tauri::command]
@@ -59,14 +94,37 @@ pub fn get_readiness(state: State<AppState>) -> ReadinessSnapshot {
     let config = state.config.lock().unwrap().clone();
     let current_model = config.model.clone();
     let model_dir = state.paths.model_dir.clone();
+    let config_file = state.paths.config_file.clone();
     let model_dir_writable = probe_model_dir_writable(&model_dir);
+    let config_writable = probe_file_parent_writable(&config_file);
+    let config_path_safe = crate::config::validate_config_path(&config_file).is_ok();
+    let model_dir_safe = model::is_safe_model_path(&model_dir, "model directory").is_ok();
     let (model_store_bytes, model_store_file_count) = summarize_model_dir(&model_dir);
+    let current_model_info = state.model_install_info(&config.model);
+    let (recommended_model, recommended_model_reason) =
+        model::recommended_model_for_language(&config.language);
+    let mut setup_steps_remaining = 0usize;
+    if !current_model_info.is_installed() {
+        setup_steps_remaining = setup_steps_remaining.saturating_add(1);
+    }
+    if accessibility::is_supported() && !accessibility::is_trusted() {
+        setup_steps_remaining = setup_steps_remaining.saturating_add(1);
+    }
+    if current_model != recommended_model {
+        setup_steps_remaining = setup_steps_remaining.saturating_add(1);
+    }
 
     ReadinessSnapshot {
         model_dir: model_dir.to_string_lossy().to_string(),
         model_dir_writable,
+        config_file: config_file.to_string_lossy().to_string(),
+        config_writable,
+        config_path_safe,
+        model_dir_safe,
         current_model,
-        current_model_installed: state.model_install_info(&config.model).is_installed(),
+        current_model_installed: current_model_info.is_installed(),
+        current_model_status: current_model_info.as_label().to_string(),
+        current_model_reason: current_model_info.reason,
         model_store_bytes,
         model_store_file_count,
         hotkey_valid: crate::validate_hotkey(&config.hotkey).is_ok(),
@@ -74,21 +132,22 @@ pub fn get_readiness(state: State<AppState>) -> ReadinessSnapshot {
         accessibility_trusted: crate::accessibility::is_supported()
             && crate::accessibility::is_trusted(),
         active_download: state.download.lock().unwrap().active,
+        recommended_model: recommended_model.to_string(),
+        recommended_model_reason: recommended_model_reason.to_string(),
+        setup_steps_remaining,
     }
+}
+
+#[tauri::command]
+pub fn get_startup_health(state: State<AppState>) -> StartupHealthSnapshot {
+    build_startup_health(&state, model::CleanupReport::default())
 }
 
 fn probe_model_dir_writable(model_dir: &std::path::Path) -> bool {
     if model::is_safe_model_path(model_dir, "model directory").is_err() {
         return false;
     }
-    let probe_path = model_dir.join(format!(
-        ".spiel-write-test.{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    let probe_path = model_dir.join(unique_probe_name("spiel-write-test"));
 
     let write_result = std::fs::OpenOptions::new()
         .create_new(true)
@@ -99,6 +158,97 @@ fn probe_model_dir_writable(model_dir: &std::path::Path) -> bool {
     let was_writable = write_result.is_ok();
     let _ = std::fs::remove_file(&probe_path);
     was_writable
+}
+
+fn probe_file_parent_writable(path: &std::path::Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let probe_path = parent.join(unique_probe_name("spiel-config-write-test"));
+
+    let write_result = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe_path)
+        .and_then(|mut f| f.write_all(b"1"));
+
+    let was_writable = write_result.is_ok();
+    let _ = std::fs::remove_file(&probe_path);
+    was_writable
+}
+
+fn unique_probe_name(prefix: &str) -> String {
+    format!(
+        ".{}.{}.{}",
+        prefix,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
+pub fn build_startup_health(
+    state: &AppState,
+    cleanup_report: model::CleanupReport,
+) -> StartupHealthSnapshot {
+    let config = state.config.lock().unwrap().clone();
+    let current_model_info = state.model_install_info(&config.model);
+    let config_path_safe = crate::config::validate_config_path(&state.paths.config_file).is_ok();
+    let model_dir_safe =
+        model::is_safe_model_path(&state.paths.model_dir, "model directory").is_ok();
+    let config_writable = probe_file_parent_writable(&state.paths.config_file);
+    let model_dir_writable = probe_model_dir_writable(&state.paths.model_dir);
+    let (recommended_model, recommended_model_reason) =
+        model::recommended_model_for_language(&config.language);
+    let mut startup_warnings = Vec::new();
+    if !config_path_safe {
+        startup_warnings.push("Config path failed safety validation.".into());
+    }
+    if !config_writable {
+        startup_warnings.push("Config directory is not writable.".into());
+    }
+    if !model_dir_safe {
+        startup_warnings.push("Model directory failed safety validation.".into());
+    }
+    if !model_dir_writable {
+        startup_warnings.push("Model directory is not writable.".into());
+    }
+    if !current_model_info.is_installed() {
+        startup_warnings.push("Current model is not installed or failed validation.".into());
+    }
+    if crate::accessibility::is_supported() && !crate::accessibility::is_trusted() {
+        startup_warnings.push("Accessibility permission is not granted yet.".into());
+    }
+    if crate::validate_hotkey(&config.hotkey).is_err() {
+        startup_warnings.push("Configured hotkey is invalid or unavailable.".into());
+    }
+
+    StartupHealthSnapshot {
+        checked_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        config_file: state.paths.config_file.to_string_lossy().to_string(),
+        config_path_safe,
+        config_writable,
+        model_dir: state.paths.model_dir.to_string_lossy().to_string(),
+        model_dir_safe,
+        model_dir_writable,
+        current_model: config.model,
+        current_model_status: current_model_info.as_label().to_string(),
+        current_model_reason: current_model_info.reason,
+        hotkey_valid: crate::validate_hotkey(&config.hotkey).is_ok(),
+        accessibility_supported: crate::accessibility::is_supported(),
+        accessibility_trusted: crate::accessibility::is_supported()
+            && crate::accessibility::is_trusted(),
+        recommended_model: recommended_model.to_string(),
+        recommended_model_reason: recommended_model_reason.to_string(),
+        removed_partial_files: cleanup_report.removed_partial_files,
+        removed_sidecar_files: cleanup_report.removed_sidecar_files,
+        startup_warnings,
+    }
 }
 
 fn summarize_model_dir(model_dir: &std::path::Path) -> (u64, usize) {
@@ -116,7 +266,7 @@ fn summarize_model_dir(model_dir: &std::path::Path) -> (u64, usize) {
             continue;
         };
 
-        if !(name.ends_with(".bin") || name.ends_with(".part")) {
+        if !(name.ends_with(".bin") || name.ends_with(".part") || name.ends_with(".sha256")) {
             continue;
         }
 
@@ -266,7 +416,7 @@ pub fn download_model(
     };
     let partial_ttl =
         model::parse_part_cleanup_ms(std::env::var("SPIEL_PART_CLEANUP_MS").ok().as_deref(), 0);
-    model::cleanup_stale_part_files(&state.paths.model_dir, partial_ttl);
+    model::cleanup_stale_model_artifacts(&state.paths.model_dir, partial_ttl);
     if model::is_installed(&state.paths.model_dir, &model_id) {
         return Err(format!("Model '{model_id}' is already installed."));
     }
@@ -290,6 +440,7 @@ pub fn download_model(
         let app_for_progress = app.clone();
         let id_for_progress = model_id.clone();
         let mut last_emit = std::time::Instant::now();
+        let started_at = std::time::Instant::now();
         let result = model::download(
             &model_dir,
             spec,
@@ -325,17 +476,34 @@ pub fn download_model(
         }
 
         let done = match &result {
-            Ok(()) => ModelDone {
+            Ok(summary) => ModelDone {
                 model_id: model_id.clone(),
                 ok: true,
                 error: None,
+                outcome: "downloaded".into(),
+                downloaded_bytes: summary.downloaded_bytes,
+                expected_bytes: summary.expected_bytes,
+                checksum_source: summary.checksum_source.clone(),
             },
             Err(e) => ModelDone {
                 model_id: model_id.clone(),
                 ok: false,
                 error: Some(e.to_string()),
+                outcome: model::classify_download_error(e).into(),
+                downloaded_bytes: 0,
+                expected_bytes: None,
+                checksum_source: "none".into(),
             },
         };
+        if let Some(st) = app.try_state::<AppState>() {
+            st.record_download_sample(DownloadPerfSample {
+                wall_time_ms: 0,
+                total_ms: started_at.elapsed().as_millis() as u64,
+                downloaded_bytes: done.downloaded_bytes,
+                expected_bytes: done.expected_bytes,
+                outcome: done.outcome.clone(),
+            });
+        }
         let _ = app.emit("model-done", done);
         if let Some(st) = app.try_state::<AppState>() {
             st.clear_model_install_cache_entry(&model_id);
@@ -406,6 +574,17 @@ pub fn toggle_dictation(app: AppHandle) {
 pub fn unload_model_from_memory(app: AppHandle, state: State<AppState>) {
     dictation::clear_model_cache(&state);
     dictation::emit_status(&app);
+}
+
+#[tauri::command]
+pub fn warm_up_model(state: State<AppState>) -> Result<String, String> {
+    let keep_loaded = state.config.lock().unwrap().keep_model_loaded;
+    dictation::warm_up_current_model(&state, keep_loaded).map_err(to_command_error)?;
+    Ok(if keep_loaded {
+        "Model warmed and kept in memory.".into()
+    } else {
+        "Model load path validated. Enable 'Keep model loaded in memory' to keep it hot.".into()
+    })
 }
 
 #[tauri::command]

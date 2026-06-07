@@ -73,10 +73,28 @@ interface PerfSnapshot {
   budget_ms: number;
   sample_count: number;
   average_total_ms: number;
+  p50_total_ms: number;
   p95_total_ms: number;
   max_total_ms: number;
   over_budget_count: number;
+  average_capture_ms: number;
+  average_transcribe_ms: number;
+  average_insert_ms: number;
+  pasted_count: number;
+  clipboard_only_count: number;
+  insert_error_count: number;
+  download_sample_count: number;
+  average_download_ms: number;
+  p95_download_ms: number;
+  max_download_ms: number;
   last: PerfSample | null;
+  last_download: {
+    wall_time_ms: number;
+    total_ms: number;
+    downloaded_bytes: number;
+    expected_bytes: number | null;
+    outcome: string;
+  } | null;
 }
 
 interface PerfEvent {
@@ -91,14 +109,44 @@ interface PerfEvent {
 interface ReadinessSnapshot {
   model_dir: string;
   model_dir_writable: boolean;
+  config_file: string;
+  config_writable: boolean;
+  config_path_safe: boolean;
+  model_dir_safe: boolean;
   current_model: string;
   current_model_installed: boolean;
+  current_model_status: string;
+  current_model_reason: string;
   model_store_bytes: number;
   model_store_file_count: number;
   hotkey_valid: boolean;
   accessibility_supported: boolean;
   accessibility_trusted: boolean;
   active_download: boolean;
+  recommended_model: string;
+  recommended_model_reason: string;
+  setup_steps_remaining: number;
+}
+
+interface StartupHealthSnapshot {
+  checked_at_ms: number;
+  config_file: string;
+  config_path_safe: boolean;
+  config_writable: boolean;
+  model_dir: string;
+  model_dir_safe: boolean;
+  model_dir_writable: boolean;
+  current_model: string;
+  current_model_status: string;
+  current_model_reason: string;
+  hotkey_valid: boolean;
+  accessibility_supported: boolean;
+  accessibility_trusted: boolean;
+  recommended_model: string;
+  recommended_model_reason: string;
+  removed_partial_files: number;
+  removed_sidecar_files: number;
+  startup_warnings: string[];
 }
 
 interface LanguageOption {
@@ -114,6 +162,7 @@ let lastTranscript = "";
 let lastError = "";
 let perf: PerfSnapshot | null = null;
 let readiness: ReadinessSnapshot | null = null;
+let startupHealth: StartupHealthSnapshot | null = null;
 let refreshInFlight = false;
 let refreshRequested = false;
 let renderQueued = false;
@@ -195,11 +244,12 @@ async function refreshAll() {
   }
   refreshInFlight = true;
   try {
-    [status, config, models, readiness] = await Promise.all([
+    [status, config, models, readiness, startupHealth] = await Promise.all([
       invoke<StatusSnapshot>("get_status"),
       invoke<Config>("get_config"),
       invoke<ModelView[]>("list_models"),
       invoke<ReadinessSnapshot>("get_readiness"),
+      invoke<StartupHealthSnapshot>("get_startup_health"),
     ]);
     perf = await invoke<PerfSnapshot>("get_perf_snapshot");
     syncRecordingClock();
@@ -298,6 +348,9 @@ function render() {
   app.appendChild(headerEl());
   if (lastError) app.appendChild(errorBanner(lastError));
   app.appendChild(statusCard(s, c));
+  if (readiness?.setup_steps_remaining || startupHealth?.startup_warnings.length) {
+    app.appendChild(setupWizardCard(c));
+  }
   app.appendChild(readinessCard());
   if (s.needs_accessibility || (s.accessibility_supported && !s.accessibility_trusted)) {
     app.appendChild(accessibilityCard(s));
@@ -386,6 +439,106 @@ function statusCard(s: StatusSnapshot, c: Config): HTMLElement {
   return card;
 }
 
+function setupWizardCard(c: Config): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<p class="section-title">Setup Wizard</p>`;
+
+  const intro = document.createElement("div");
+  intro.className = "privacy";
+  intro.textContent =
+    "This checklist keeps Spiel quiet and dependable on first run: install the right model, confirm permissions, and optionally warm the model path before your first dictation.";
+  card.appendChild(intro);
+
+  if (startupHealth?.startup_warnings.length) {
+    for (const warning of startupHealth.startup_warnings) {
+      const warn = document.createElement("div");
+      warn.className = "warn";
+      warn.textContent = warning;
+      card.appendChild(warn);
+    }
+  }
+
+  if (readiness && !readiness.current_model_installed) {
+    const recommendedModel = readiness.recommended_model;
+    const row = document.createElement("div");
+    row.className = "model";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span class="name">Install a speech model</span><span class="note">${readiness.recommended_model_reason}</span>`;
+    row.appendChild(meta);
+    const btn = document.createElement("button");
+    btn.textContent = `Download ${recommendedModel}`;
+    btn.onclick = () => {
+      lastError = "";
+      downloads[recommendedModel] = { downloaded: 0, total: null };
+      render();
+      invoke("download_model", { modelId: recommendedModel }).catch((e) => {
+        delete downloads[recommendedModel];
+        setError(`Download failed: ${e}`);
+      });
+    };
+    row.appendChild(btn);
+    card.appendChild(row);
+  }
+
+  if (readiness && readiness.current_model !== readiness.recommended_model) {
+    const recommendedModel = readiness.recommended_model;
+    const row = document.createElement("div");
+    row.className = "model";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span class="name">Recommended model</span><span class="note">Current language: ${c.language}. Suggested: ${recommendedModel}.</span>`;
+    row.appendChild(meta);
+    const btn = document.createElement("button");
+    btn.textContent = "Use Recommendation";
+    btn.onclick = () => saveConfig({ model: recommendedModel });
+    row.appendChild(btn);
+    card.appendChild(row);
+  }
+
+  if (readiness?.accessibility_supported && !readiness.accessibility_trusted) {
+    const row = document.createElement("div");
+    row.className = "model";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span class="name">Grant Accessibility</span><span class="note">Needed for seamless auto-paste. Without it, Spiel falls back to clipboard-only insertion.</span>`;
+    row.appendChild(meta);
+    const btn = document.createElement("button");
+    btn.textContent = "Grant";
+    btn.onclick = async () => {
+      await invoke("request_accessibility").catch((e) => console.error(e));
+      setTimeout(refreshStatusOnly, 500);
+    };
+    row.appendChild(btn);
+    card.appendChild(row);
+  }
+
+  const warmupRow = document.createElement("div");
+  warmupRow.className = "model";
+  const warmMeta = document.createElement("div");
+  warmMeta.className = "meta";
+  warmMeta.innerHTML = `<span class="name">Warm the current model</span><span class="note">Useful after a fresh install or when you want to validate the load path before dictating.</span>`;
+  warmupRow.appendChild(warmMeta);
+  const warmBtn = document.createElement("button");
+  warmBtn.textContent = "Warm Now";
+  warmBtn.onclick = async () => {
+    const message = await invoke<string>("warm_up_model").catch((e) => {
+      setError(`Could not warm model: ${e}`);
+      return null;
+    });
+    if (message) {
+      lastError = "";
+      status = status ? { ...status, message } : status;
+      render();
+    }
+  };
+  warmupRow.appendChild(warmBtn);
+  card.appendChild(warmupRow);
+
+  return card;
+}
+
 function readinessCard(): HTMLElement {
   const card = document.createElement("div");
   card.className = "card";
@@ -405,10 +558,15 @@ function readinessCard(): HTMLElement {
   modelPath.textContent = `Model directory: ${readiness.model_dir}`;
   const writable = document.createElement("div");
   writable.textContent = `Model directory writable: ${readiness.model_dir_writable ? "yes" : "no"}`;
+  const configPath = document.createElement("div");
+  configPath.textContent = `Config file: ${readiness.config_file}`;
+  const configWritable = document.createElement("div");
+  configWritable.textContent = `Config writable: ${readiness.config_writable ? "yes" : "no"}`;
   const hotkey = document.createElement("div");
   hotkey.textContent = `Current hotkey valid: ${readiness.hotkey_valid ? "yes" : "no"}`;
   const activeModel = document.createElement("div");
-  activeModel.textContent = `Current model: ${readiness.current_model} (${readiness.current_model_installed ? "installed" : "not installed"})`;
+  activeModel.textContent =
+    `Current model: ${readiness.current_model} (${readiness.current_model_status})`;
   const access = document.createElement("div");
   if (!readiness.accessibility_supported) {
     access.textContent = "Accessibility: unsupported on this platform";
@@ -419,8 +577,27 @@ function readinessCard(): HTMLElement {
   downloading.textContent = `Model download active: ${readiness.active_download ? "yes" : "no"}`;
   const storage = document.createElement("div");
   storage.textContent = `Model store: ${readiness.model_store_file_count} files, ${fmtBytes(readiness.model_store_bytes)}`;
-  row.append(modelPath, writable, storage, hotkey, activeModel, access, downloading);
+  const recommendation = document.createElement("div");
+  recommendation.textContent = `Recommended model: ${readiness.recommended_model}`;
+  row.append(
+    modelPath,
+    writable,
+    configPath,
+    configWritable,
+    storage,
+    hotkey,
+    activeModel,
+    recommendation,
+    access,
+    downloading,
+  );
   card.appendChild(row);
+  if (readiness.current_model_reason) {
+    const reason = document.createElement("div");
+    reason.className = "privacy";
+    reason.textContent = `Current model detail: ${readiness.current_model_reason}`;
+    card.appendChild(reason);
+  }
   return card;
 }
 
@@ -582,6 +759,13 @@ function settingsCard(c: Config): HTMLElement {
   langInputWrap.appendChild(languageList);
   langWrap.appendChild(langInputWrap);
   card.appendChild(langWrap);
+  if (readiness) {
+    const langHint = document.createElement("div");
+    langHint.className = "privacy";
+    langHint.textContent =
+      `Recommended for "${c.language}": ${readiness.recommended_model}. ${readiness.recommended_model_reason}`;
+    card.appendChild(langHint);
+  }
 
   card.appendChild(
     toggleField("Auto-paste at cursor", c.auto_paste, (v) => saveConfig({ auto_paste: v })),
@@ -635,11 +819,24 @@ function settingsCard(c: Config): HTMLElement {
     await refreshStatusOnly();
   };
   card.appendChild(unloadBtn);
+  const warmBtn = document.createElement("button");
+  warmBtn.textContent = "Warm Current Model";
+  warmBtn.onclick = async () => {
+    const message = await invoke<string>("warm_up_model").catch((e) => {
+      setError(`Could not warm model: ${e}`);
+      return null;
+    });
+    if (message) {
+      lastError = "";
+      await refreshStatusOnly();
+    }
+  };
+  card.appendChild(warmBtn);
   const memHint = document.createElement("div");
   memHint.className = "privacy";
   memHint.textContent =
     "For lower memory: use Tiny model, keep model loaded OFF, and set threads to 1-2. " +
-    "This reduces idle RAM significantly at the cost of slower first transcription after each stop.";
+    "For lower first-transcription latency: keep model loaded ON and warm the current model after startup.";
   card.appendChild(memHint);
   return card;
 }
@@ -661,9 +858,21 @@ function perfCard(p: PerfSnapshot): HTMLElement {
   const summary = document.createElement("div");
   summary.className = "privacy";
   summary.textContent =
-    `Samples: ${p.sample_count} · Avg: ${p.average_total_ms}ms · P95: ${p.p95_total_ms}ms · ` +
-    `Max: ${p.max_total_ms}ms · Over budget (${p.budget_ms}ms): ${p.over_budget_count}`;
+    `Samples: ${p.sample_count} · Avg: ${p.average_total_ms}ms · P50: ${p.p50_total_ms}ms · ` +
+    `P95: ${p.p95_total_ms}ms · Max: ${p.max_total_ms}ms · Over budget (${p.budget_ms}ms): ${p.over_budget_count}`;
   card.appendChild(summary);
+
+  const stageSummary = document.createElement("div");
+  stageSummary.className = "privacy";
+  stageSummary.textContent =
+    `Stage averages: capture ${p.average_capture_ms}ms · transcribe ${p.average_transcribe_ms}ms · insert ${p.average_insert_ms}ms`;
+  card.appendChild(stageSummary);
+
+  const outcomeSummary = document.createElement("div");
+  outcomeSummary.className = "privacy";
+  outcomeSummary.textContent =
+    `Outcomes: pasted ${p.pasted_count} · clipboard-only ${p.clipboard_only_count} · insert errors ${p.insert_error_count}`;
+  card.appendChild(outcomeSummary);
 
   if (p.last) {
     const last = document.createElement("div");
@@ -672,6 +881,23 @@ function perfCard(p: PerfSnapshot): HTMLElement {
       `Last: total ${p.last.total_ms}ms (capture ${p.last.capture_ms}ms, transcribe ${p.last.transcribe_ms}ms, ` +
       `insert ${p.last.insert_ms}ms) · chars ${p.last.text_chars} · outcome ${p.last.outcome}`;
     card.appendChild(last);
+  }
+
+  const downloadSummary = document.createElement("div");
+  downloadSummary.className = "privacy";
+  downloadSummary.textContent =
+    `Download samples: ${p.download_sample_count} · Avg ${p.average_download_ms}ms · ` +
+    `P95 ${p.p95_download_ms}ms · Max ${p.max_download_ms}ms`;
+  card.appendChild(downloadSummary);
+
+  if (p.last_download) {
+    const lastDownload = document.createElement("div");
+    lastDownload.className = "privacy";
+    lastDownload.textContent =
+      `Last download: ${p.last_download.total_ms}ms · ${fmtBytes(p.last_download.downloaded_bytes)} ` +
+      `${p.last_download.expected_bytes ? `/ ${fmtBytes(p.last_download.expected_bytes)}` : ""} · ` +
+      `outcome ${p.last_download.outcome}`;
+    card.appendChild(lastDownload);
   }
 
   const controls = document.createElement("div");
@@ -783,6 +1009,10 @@ async function init() {
   await listen<PerfEvent>("perf", () => {
     refreshPerfOnly();
   });
+  await listen<StartupHealthSnapshot>("startup-health", (e) => {
+    startupHealth = e.payload;
+    queueRender();
+  });
   await listen<{ model_id: string; downloaded: number; total: number | null }>(
     "model-progress",
     (e) => {
@@ -793,10 +1023,19 @@ async function init() {
       queueRender();
     },
   );
-  await listen<{ model_id: string; ok: boolean; error: string | null }>("model-done", (e) => {
+  await listen<{
+    model_id: string;
+    ok: boolean;
+    error: string | null;
+    outcome: string;
+    downloaded_bytes: number;
+    expected_bytes: number | null;
+    checksum_source: string;
+  }>("model-done", (e) => {
     delete downloads[e.payload.model_id];
     if (!e.payload.ok) {
-      lastError = `Model download failed: ${e.payload.error ?? "unknown error"}`;
+      lastError =
+        `Model download failed (${e.payload.outcome}): ${e.payload.error ?? "unknown error"}`;
     } else {
       lastError = "";
     }
