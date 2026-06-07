@@ -1,26 +1,30 @@
 # Spiel
 
-Speak, and it lands where your cursor is.
+Spiel is a local-first macOS push-to-talk dictation app built with Tauri + Rust.
+It is designed to be quiet, private, and immediately usable:
 
-Spiel is a local-first push-to-talk dictation app for macOS. Press a global hotkey, speak, press again, and Spiel transcribes on-device with Whisper and pastes into the focused app.
+- Press one global hotkey to start/stop recording.
+- Transcribe offline with whisper.cpp (`whisper-rs`).
+- Insert text where your cursor is via a trusted accessibility paste flow.
+- Fall back to clipboard paste if auto-paste is unavailable.
 
-## What It Does
+The codebase is intentionally compact and optimized for reliability in long-running, real-world usage.
 
-- Menu-bar app (no Dock icon).
-- One dictation path for hotkey, tray action, and UI button.
-- In-memory audio only (no temp audio files).
-- On-device transcription (`whisper-rs` / whisper.cpp).
-- Cursor insertion via clipboard + synthesized Cmd+V.
-- Fallback behavior when Accessibility is missing: transcript stays on clipboard.
+## Why Spiel is Universal + Enterprise-Focused
 
-## Privacy Model
+- **Offline first by default**: no transcription traffic leaves your device.
+- **Multilingual models** are available directly in the model registry.
+- **Predictable settings path** and clear runtime state model reduce support burden.
+- **Memory controls** (thread count + keep-model-in-RAM toggles) allow trade-offs by deployment profile.
+- **Failure-safe startup and config writes** reduce startup-brick/recovery risks.
+- **Deterministic model downloads** with checksum/length checks and `.part` cleanup on failure.
+- **Permission-safe UX** for microphone and Accessibility.
 
-- No accounts, no telemetry, no cloud sync.
-- No network traffic during dictation/transcription.
-- One network path exists: model download you explicitly trigger.
-- Persisted local files:
-  - `config.json` in app config directory
-  - Whisper model files in app data directory
+## Architecture (2-minute view)
+
+- **Frontend (`src/main.ts`)**: settings/status window and tray-oriented controls.
+- **Backend (`src-tauri/src/`)**: recording, model download, transcription, insertion, and state.
+- **No network in the transcription hot path**: model download is user-initiated, one-time, cached locally.
 
 ## Requirements
 
@@ -39,13 +43,74 @@ npm run tauri dev
 
 ## First Run
 
-1. Open **Settings** from the tray icon.
-2. Download a model (`base.en` recommended).
+1. Start the app and open **Settings** from the tray icon.
+2. Choose a model (tiny/base/small) and download it.
 3. Grant **Microphone** permission when prompted.
-4. Grant **Accessibility** for auto-paste when prompted.
-5. Use `Cmd+Alt+D` to start/stop dictation.
+4. If using auto-paste, grant **Accessibility** when prompted.
+5. Press `Cmd+Alt+D` (or your custom hotkey).
 
-## Build And Verification
+## Core Settings
+
+- **hotkey**
+- **model**
+  - `tiny.en`, `base.en`, `small.en` (English-only)
+  - `tiny`, `base`, `small`, `medium` (multilingual)
+- **language**
+  - `auto` (detect automatically)
+  - locale shorthand (`en`, `es`, `fr`, `de`, `pt`, `ru`, `ja`, `zh`, ...)
+- **auto_paste**
+- **restore_clipboard**
+- **keep_model_loaded**
+- **transcription_threads**
+- **max_seconds**
+
+`language` is validated against selected model semantics:
+
+- English-only model + non-English hint -> automatically falls back to `en`.
+- Multilingual model + invalid/unsupported hint -> falls back to `auto`.
+
+## Performance and Memory Profiles
+
+In the UI **Settings** panel you also get quick profiles:
+
+- **Low Memory**: `tiny.en`, 1 thread, unload model after each dictation
+- **Balanced**: `base.en`, 2 threads, unload model after each dictation
+- **Quality**: `small` (multilingual), 2 threads, unload model after each dictation
+- **Global**: `medium` (multilingual), 2 threads, unload model after each dictation
+
+You can also add/remove `keep_model_loaded` manually per session.
+
+### Useful memory tuning
+
+- Set `keep_model_loaded = false` to free model RAM after each run.
+- Reduce `transcription_threads` for lower peak memory/CPU pressure.
+- Prefer English-only models for memory-critical machines.
+
+## Performance Observability
+
+When `SPIEL_PROFILE=1`, additional runtime metrics are tracked and shown in the Settings panel.
+
+```bash
+SPIEL_PROFILE=1 npm run tauri dev
+```
+
+## Runtime Environment Controls
+
+- `SPIEL_WHISPER_THREADS` (`1..16`) overrides `transcription_threads` at runtime.
+- `SPIEL_PRE_PASTE_DELAY_MS` (default `60`) tuning delay before Cmd+V.
+- `SPIEL_RESTORE_DELAY_MS` (default `220`) tuning delay before clipboard restore.
+- `SPIEL_MODEL_DIR` to keep Whisper models in a custom directory.
+- `SPIEL_LATENCY_BUDGET_MS` (default `8000`) used by profile statistics.
+
+## Security & Privacy Notes
+
+- No accounts, no telemetry.
+- No audio is written to disk.
+- Raw audio exists only in memory during recording.
+- Model artifacts download into the app data directory and are validated before use.
+- Insertion failures and permission state are surfaced explicitly in the UI.
+
+## Build and verification
 
 ```bash
 npm run build
@@ -55,74 +120,38 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-## Settings
+## Command Surface
 
-- `hotkey`
-- `model` (`tiny.en`, `base.en`, `small.en`)
-- `language` (`en`, `auto`)
-- `auto_paste`
-- `restore_clipboard`
-- `keep_model_loaded`
-- `transcription_threads` (`1..8`)
-- `max_seconds`
+Backend commands exposed to the UI:
 
-Default memory-focused settings:
-
-- `model = tiny.en`
-- `keep_model_loaded = false`
-- `transcription_threads = 2`
-
-## Performance And Profiling
-
-Spiel includes low-latency defaults plus runtime tuning:
-
-- `SPIEL_WHISPER_THREADS` (`1..16`)
-- `SPIEL_PRE_PASTE_DELAY_MS` (default `60`)
-- `SPIEL_RESTORE_DELAY_MS` (default `220`)
-- `SPIEL_LATENCY_BUDGET_MS` (default `8000`)
-
-Enable profiling mode:
-
-```bash
-SPIEL_PROFILE=1 npm run tauri dev
-```
-
-### Memory Target Recipe (<100MB idle)
-
-For the lowest practical idle memory footprint:
-
-1. Use `Tiny` model.
-2. Keep **model loaded in memory** set to `OFF`.
-3. Set **Transcription threads** to `1` or `2`.
-4. After dictation, use **Unload Model From Memory Now** if needed.
-
-### Compare Base vs Small Model Memory
-
-1. Start app: `npm run tauri dev`
-2. Open Settings.
-3. Apply **Balanced** profile (`base.en`, unload model, 2 threads).
-4. Dictate once, stop, and note memory usage in Activity Monitor.
-5. Apply **Quality** profile (`small.en`, unload model, 2 threads).
-6. Repeat and compare.
-7. Toggle `keep_model_loaded` on/off for each model to see idle memory impact.
-8. Try `transcription_threads=1`, `2`, and `4` to compare memory/latency tradeoffs.
-
-When enabled, the settings UI shows a **Performance Profile** card with rolling latency stats:
-
-- sample count
-- average / p95 / max total latency
-- over-budget count
-- most recent stage breakdown (capture, transcribe, insert, total)
+- `get_status`
+- `get_config`
+- `get_perf_snapshot`
+- `clear_perf_samples`
+- `update_config`
+- `list_models`
+- `download_model`
+- `delete_model`
+- `cancel_download`
+- `toggle_dictation`
+- `unload_model_from_memory`
+- `accessibility_status`
+- `request_accessibility`
+- `show_settings`
 
 ## Troubleshooting
 
-- Hotkey does nothing:
-  - another app may own the shortcut; change `hotkey` in Settings.
-- Text does not auto-paste:
-  - grant Accessibility; transcript is still on clipboard.
-- Build fails with missing C++ headers:
-  - reinstall Command Line Tools (`xcode-select --install`).
+- **Hotkey does nothing**
+  - Another app may already use the shortcut; change it in Settings.
+- **Text does not auto-paste**
+  - Accessibility must be trusted. Grant permission and retry.
+- **Model download stalls/aborts**
+  - Check network connectivity and storage space.
+- **Unexpected model load failures**
+  - Remove the failed `.part` file and retry download from Settings.
 
-## Repository Notes
+## Release Notes / Reviews
 
-This branch is the v2 rebuild (`rebuild/spiel-v2`) after a review of the earlier implementation. Historical review doc: `docs/REVIEW-2026-05-30-opus48.md`.
+- `docs/REVIEW-2026-05-30-opus48.md` contains the historical review.
+- `BUG_HUNT_REPORT.md` contains prior bug-fix evidence and prior check-ins.
+- `docs/RELEASE_READINESS_NEXT_SESSION.md` tracks the current deep-dive action list and remaining work.

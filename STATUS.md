@@ -27,7 +27,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Current Command Surface (Tauri)
 
-The app currently exposes 12 Tauri commands:
+The app currently exposes 13 Tauri commands:
 
 - `get_status`
 - `get_config`
@@ -37,6 +37,7 @@ The app currently exposes 12 Tauri commands:
 - `list_models`
 - `download_model`
 - `cancel_download`
+- `delete_model`
 - `toggle_dictation`
 - `accessibility_status`
 - `request_accessibility`
