@@ -39,7 +39,7 @@ impl Capture {
 pub struct Recorder {
     stop_tx: mpsc::Sender<()>,
     result_rx: mpsc::Receiver<crate::error::Result<Vec<f32>>>,
-    in_rate: u32,
+    sample_rate: u32,
     /// Captured live so the UI can show an elapsed timer.
     elapsed_ms: Arc<Mutex<u64>>,
 }
@@ -64,10 +64,10 @@ impl Recorder {
             .map_err(|_| SpielError::Audio("recording thread did not return in time".into()))?
             .map_err(|err| SpielError::Audio(err.to_string()))?;
 
-        let samples = if self.in_rate == TARGET_SAMPLE_RATE {
+        let samples = if self.sample_rate == TARGET_SAMPLE_RATE {
             raw
         } else {
-            resample_linear(&raw, self.in_rate, TARGET_SAMPLE_RATE)
+            resample_linear(&raw, self.sample_rate, TARGET_SAMPLE_RATE)
         };
 
         Ok(Capture { samples })
@@ -103,7 +103,8 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
 
     // Time-bound capture by input sample rate for real-time behavior.
     // Output is still trimmed to the same wall-clock duration after resampling.
-    let max_input_samples = (in_rate as usize) * (max_seconds as usize);
+    let capture_rate = captured_sample_rate(in_rate);
+    let max_captured_samples = (capture_rate as usize) * (max_seconds as usize);
     let max_output_samples = (TARGET_SAMPLE_RATE as usize) * (max_seconds as usize);
     let need_downsample = in_rate > TARGET_SAMPLE_RATE;
     let downsample_ratio = if need_downsample {
@@ -118,7 +119,7 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
 
     std::thread::spawn(move || {
         let buffer: Arc<Mutex<Vec<f32>>> =
-            Arc::new(Mutex::new(Vec::with_capacity(max_input_samples)));
+            Arc::new(Mutex::new(Vec::with_capacity(max_captured_samples)));
         let cb_buffer = Arc::clone(&buffer);
 
         let err_fn = |e| eprintln!("[spiel] audio stream error: {e}");
@@ -130,7 +131,7 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
             sample_format,
             StreamBuildContext {
                 buffer: cb_buffer,
-                max_samples: max_input_samples,
+                max_samples: max_captured_samples,
                 channels: in_channels,
                 downsample_state,
                 downsample_ratio,
@@ -167,7 +168,7 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
                 break;
             }
             // Hard cap reached: stop on our own.
-            if buffer.lock().unwrap().len() >= max_input_samples {
+            if buffer.lock().unwrap().len() >= max_captured_samples {
                 break;
             }
         }
@@ -182,9 +183,17 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
     Ok(Recorder {
         stop_tx,
         result_rx,
-        in_rate,
+        sample_rate: capture_rate,
         elapsed_ms,
     })
+}
+
+fn captured_sample_rate(input_rate: u32) -> u32 {
+    if input_rate > TARGET_SAMPLE_RATE {
+        TARGET_SAMPLE_RATE
+    } else {
+        input_rate
+    }
 }
 
 fn build_stream(
@@ -225,10 +234,7 @@ fn build_stream(
                                     state.frame_position = state.frame_position.saturating_add(1);
                                 }
                             } else {
-                                for frame in data
-                                    .chunks_exact(channels as usize)
-                                    .take(remaining / channels as usize)
-                                {
+                                for frame in data.chunks_exact(channels as usize) {
                                     let frame_sum: f32 = frame.iter().map(|&s| ($to_f32)(s)).sum();
                                     let sample = frame_sum / frame.len() as f32;
                                     if (state.frame_position as f64) >= state.next_output_frame {
@@ -260,15 +266,12 @@ fn build_stream(
                         if channels <= 1 {
                             buf.extend(data.iter().take(remaining).map(|&raw| ($to_f32)(raw)));
                         } else {
-                            buf.extend(
-                                data.chunks_exact(channels as usize)
-                                    .take(remaining / channels as usize)
-                                    .map(|frame| {
-                                        let frame_sum: f32 =
-                                            frame.iter().map(|&s| ($to_f32)(s)).sum();
-                                        frame_sum / frame.len() as f32
-                                    }),
-                            );
+                            buf.extend(data.chunks_exact(channels as usize).take(remaining).map(
+                                |frame| {
+                                    let frame_sum: f32 = frame.iter().map(|&s| ($to_f32)(s)).sum();
+                                    frame_sum / frame.len() as f32
+                                },
+                            ));
                         }
                     }
                     // Ignore partial frames; this prevents uneven-channel artifacts while
@@ -386,6 +389,18 @@ mod tests {
     fn resample_noop_when_rates_match() {
         let input = vec![0.1, 0.2, 0.3];
         assert_eq!(resample_linear(&input, 16_000, 16_000), input);
+    }
+
+    #[test]
+    fn high_rate_input_is_marked_as_already_downsampled() {
+        assert_eq!(captured_sample_rate(48_000), TARGET_SAMPLE_RATE);
+        assert_eq!(captured_sample_rate(44_100), TARGET_SAMPLE_RATE);
+    }
+
+    #[test]
+    fn low_rate_input_is_left_for_finish_resampling() {
+        assert_eq!(captured_sample_rate(8_000), 8_000);
+        assert_eq!(captured_sample_rate(TARGET_SAMPLE_RATE), TARGET_SAMPLE_RATE);
     }
 
     #[test]
