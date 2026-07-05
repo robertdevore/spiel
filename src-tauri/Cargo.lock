@@ -2362,6 +2362,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.11.1",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -3585,6 +3586,7 @@ dependencies = [
  "core-graphics 0.24.0",
  "cpal",
  "macos-accessibility-client",
+ "objc2-app-kit",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

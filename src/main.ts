@@ -722,7 +722,7 @@ function settingsCard(c: Config): HTMLElement {
   hkHint.className = "privacy";
   hkHint.textContent =
     "Modifiers + a key, e.g. Cmd+Alt+D or Cmd+Shift+Space (letters/named keys only — '?' won't work). " +
-    "Trigger dictation with the hotkey, not the menu-bar Start/Stop: clicking the menu bar moves focus off your text field, so auto-paste has nowhere to land.";
+    "Start and stop dictation from the hotkey, menu bar, or this button. Spiel restores focus before pasting so the transcript lands at your cursor.";
   card.appendChild(hkHint);
 
   const langWrap = document.createElement("label");

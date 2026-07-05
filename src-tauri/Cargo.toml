@@ -39,6 +39,8 @@ sha2 = "0.10"
 macos-accessibility-client = "0.0.1"
 # Synthesize a real Cmd+V keystroke (keycode + modifier flag), not a Unicode char.
 core-graphics = "0.24"
+# Track and restore the app that owned focus before Spiel's tray/settings UI was clicked.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSRunningApplication", "NSWorkspace", "libc"] }
 
 [profile.release]
 strip = true

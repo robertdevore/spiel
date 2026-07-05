@@ -10,6 +10,7 @@ mod commands;
 mod config;
 mod dictation;
 mod error;
+mod focus;
 mod insert;
 mod model;
 mod state;
@@ -96,6 +97,7 @@ pub fn run() {
             start_optional_model_warmup(handle.clone());
 
             start_accessibility_poll(handle.clone());
+            focus::start_tracker(handle.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

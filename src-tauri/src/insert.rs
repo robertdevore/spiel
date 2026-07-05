@@ -8,6 +8,7 @@
 
 use crate::accessibility;
 use crate::error::{Result, SpielError};
+use crate::focus::{self, FocusTarget};
 use serde::Serialize;
 
 const DEFAULT_PRE_PASTE_DELAY_MS: u64 = 60;
@@ -26,7 +27,12 @@ pub struct InsertOutcome {
 }
 
 /// Place `text` into the focused app. `auto_paste`/`restore_clipboard` come from settings.
-pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<InsertOutcome> {
+pub fn insert(
+    text: &str,
+    auto_paste: bool,
+    restore_clipboard: bool,
+    focus_target: Option<FocusTarget>,
+) -> Result<InsertOutcome> {
     if text.is_empty() {
         return Err(SpielError::Insertion("nothing to insert".into()));
     }
@@ -53,12 +59,14 @@ pub fn insert(text: &str, auto_paste: bool, restore_clipboard: bool) -> Result<I
         return Ok(outcome);
     }
 
-    if !accessibility::is_trusted() {
+    if !accessibility::is_trusted() && !accessibility::prompt_if_needed() {
         // Don't paste blindly (the keystrokes would no-op); keep text on the clipboard.
         outcome.clipboard_only = true;
         outcome.needs_accessibility = true;
         return Ok(outcome);
     }
+
+    focus::restore_before_paste(focus_target);
 
     // Let the pasteboard write settle before we trigger the paste, so the focused app
     // can't read a stale changeCount.

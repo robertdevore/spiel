@@ -6,7 +6,7 @@
 use crate::error::SpielError;
 use crate::state::{AppState, PerfSample, Phase};
 use crate::whisper::Transcriber;
-use crate::{audio, insert, model};
+use crate::{audio, focus, insert, model};
 use serde::Serialize;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
@@ -66,6 +66,7 @@ pub fn toggle(app: &AppHandle) {
 }
 
 fn start(app: &AppHandle) {
+    focus::remember_current_frontmost(app);
     let state = app.state::<AppState>();
 
     let (model_id, max_seconds) = {
@@ -91,6 +92,7 @@ fn start(app: &AppHandle) {
         }
         Err(e) => {
             state.set_phase(Phase::Error, Some(e.to_string()));
+            show_settings_window(app);
         }
     }
     emit_status(app);
@@ -228,6 +230,7 @@ fn process_capture(
         let c = state.config.lock().unwrap();
         (c.auto_paste, c.restore_clipboard)
     };
+    let focus_target = *state.last_focus_target.lock().unwrap();
 
     // Clipboard access and Cmd+V synthesis go through AppKit/CoreGraphics, which must run
     // on the main thread — doing this on the worker thread crashes the app. Marshal it.
@@ -237,7 +240,7 @@ fn process_capture(
     let _ = app.clone().run_on_main_thread(move || {
         let state = app.state::<AppState>();
         let mut sample_outcome = "insert_error".to_string();
-        match insert::insert(&text, auto_paste, restore) {
+        match insert::insert(&text, auto_paste, restore, focus_target) {
             Ok(outcome) => {
                 state.status.lock().unwrap().needs_accessibility = outcome.needs_accessibility;
                 let message = if outcome.needs_accessibility {
@@ -255,6 +258,9 @@ fn process_capture(
                     "insert_ok".into()
                 };
                 state.set_phase(Phase::Idle, message);
+                if outcome.needs_accessibility || outcome.clipboard_only {
+                    show_settings_window(&app);
+                }
                 let _ = app.emit("transcript", TranscriptEvent { text, outcome });
             }
             Err(e) => {

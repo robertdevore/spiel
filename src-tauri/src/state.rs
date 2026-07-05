@@ -2,6 +2,7 @@
 
 use crate::audio::Recorder;
 use crate::config::{Config, Paths};
+use crate::focus::FocusTarget;
 use crate::model;
 use crate::whisper::Transcriber;
 use serde::Serialize;
@@ -64,6 +65,9 @@ pub struct AppState {
     /// Lazily-loaded, cached model context. Reloaded when the model setting changes.
     pub transcriber: Mutex<Option<Transcriber>>,
     pub download: Mutex<DownloadState>,
+    /// Last non-Spiel application that owned focus. Used to paste back into the app
+    /// where the cursor was before the tray/settings UI stole focus.
+    pub last_focus_target: Mutex<Option<FocusTarget>>,
     model_install_cache: Mutex<HashMap<String, CachedModelInstall>>,
     pub perf: Mutex<PerfState>,
 }
@@ -77,6 +81,7 @@ impl AppState {
             recorder: Mutex::new(None),
             transcriber: Mutex::new(None),
             download: Mutex::new(DownloadState::default()),
+            last_focus_target: Mutex::new(None),
             model_install_cache: Mutex::new(HashMap::new()),
             perf: Mutex::new(PerfState::new()),
         }
