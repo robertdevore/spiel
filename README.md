@@ -82,7 +82,8 @@ npm run package:linux
 Native Windows and Linux installers should be built on Windows and Linux runners. The
 `Package apps` GitHub Actions workflow builds and uploads:
 
-- `Spiel-macOS`: `.app` and `.dmg`
+- `Spiel-macOS-arm64`: Apple Silicon `.app` and `.dmg`
+- `Spiel-macOS-x64`: Intel `.app` and `.dmg`
 - `Spiel-Windows`: `.msi` and NSIS `.exe`
 - `Spiel-Linux`: `.AppImage` and `.deb`
 

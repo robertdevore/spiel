@@ -20,10 +20,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS app and DMG
+          - name: macOS Apple Silicon app and DMG
             os: macos-latest
             command: npm run package:mac
-            artifact: Spiel-macOS
+            artifact: Spiel-macOS-arm64
+            paths: |
+              release/artifacts/*_macOS_*.dmg
+              release/artifacts/*_macOS_*.app.zip
+          - name: macOS Intel app and DMG
+            os: macos-15-intel
+            command: npm run package:mac
+            artifact: Spiel-macOS-x64
             paths: |
               release/artifacts/*_macOS_*.dmg
               release/artifacts/*_macOS_*.app.zip

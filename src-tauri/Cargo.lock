@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "spiel"
-version = "0.2.0"
+version = "1.0.0-beta.0"
 dependencies = [
  "arboard",
  "core-graphics 0.24.0",
