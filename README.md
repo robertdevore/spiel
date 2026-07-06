@@ -1,77 +1,135 @@
 # Spiel
 
-Spiel is a local-first macOS dictation stack built with **Tauri + Rust** and backed by Whisper (`whisper-rs`) for offline transcription.
+Spiel is a local-first desktop dictation app. Press a hotkey, speak, press it again, and Spiel transcribes your speech locally and inserts the text where your cursor was.
 
-It is designed to feel “quiet” in operation:
+It is built with Tauri, Rust, and Whisper through `whisper-rs`.
 
-- no background servers
-- no telemetry
-- no model traffic after setup
-- no raw audio persisted to disk
+## Why Spiel Exists
 
-## What’s in the repo now
+Most dictation tools either send audio to a cloud service, interrupt your workflow, or require a subscription. Spiel is designed to be quiet, fast, and private:
 
-- `src/main.ts` — settings/status UI + model list/actions.
-- `src/styles.css` — minimal styling.
-- `src-tauri/src/` — Rust backend runtime: capture, transcription, downloads, insertion, and IPC.
-- `dist/` — generated frontend bundle from the latest build (not required to keep in source control).
-- `docs/` — review notes and release-readiness tracking.
-- `BUG_HUNT_REPORT.md` and `STATUS.md` — prior findings and execution notes.
+- Transcription runs on your machine.
+- No account is required.
+- No telemetry is built in.
+- Normal dictation does not write raw audio files to disk.
+- Model downloads happen only when you choose to install a model.
 
-This keeps source-of-truth in `src/` and `src-tauri/src/`, with only build/reference artifacts at root.
+## Download
 
-## Core Experience
+Installers are attached to GitHub releases:
 
-- Global hotkey toggle (`Cmd+Alt+D` by default).
-- Menu bar app with tray status and settings.
-- Start recording → transcribe → insert path in one worker thread.
-- Model-driven fallback messages for permission and startup issues.
-- Model list with install state (`installed`, `partial`, `corrupt`, `missing`, `unsafe_path`).
-- Startup health diagnostics and a first-run setup wizard for model, permission, and warm-up guidance.
+https://github.com/robertdevore/spiel/releases
 
-## Universal/Enterprise Characteristics
+Choose the file for your computer:
 
-- **Offline-first**: transcription runs locally.
-- **Permission-safe**: microphone + Accessibility prompts are explicit and visible.
-- **Config hygiene**: configuration is normalized, validated, and safely saved through atomic temp-file writes.
-- **Model integrity checks**:
-  - GGML magic header
-  - size sanity checks
-  - optional SHA pin (when provided)
-  - safe path checks that reject symlink targets
-- **Operational controls** for resource policy:
-  - `keep_model_loaded` toggle
-  - thread count clamp
-  - recording duration clamp
-  - install cache + path checks
-  - install health visibility (`installed`, `partial`, `corrupt`, `missing`, `unsafe_path`) with reason and age metadata
-  - startup health snapshot + guided setup actions
+- Intel Mac: `Spiel_1.0.0_macOS_x64.dmg`
+- Apple Silicon Mac: `Spiel_1.0.0_macOS_arm64.dmg`
+- Windows: `Spiel_1.0.0_x64-setup.exe` or `Spiel_1.0.0_x64_en-US.msi`
+- Linux: `Spiel_1.0.0_amd64.AppImage` or `Spiel_1.0.0_amd64.deb`
 
-## Supported Models
+### macOS Security Note
 
-Registry entries include English and multilingual families for pragmatic tradeoffs:
+Current release builds are unsigned and not notarized. macOS may show a Gatekeeper warning such as:
 
-- `tiny.en`, `base.en`, `small.en` (English-only)
-- `tiny`, `base`, `small`, `medium` (multilingual)
+> Apple could not verify "Spiel.app" is free of malware.
 
-Language hints are validated against the selected model family so unsupported combinations automatically degrade to safe defaults.
+For now, open it from `System Settings -> Privacy & Security -> Open Anyway`, or remove the quarantine flag after copying the app to Applications:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Spiel.app
+open /Applications/Spiel.app
+```
+
+Signed and notarized macOS builds require Apple Developer ID credentials in the release workflow.
 
 ## Quick Start
 
+1. Install Spiel for your platform.
+2. Open the app.
+3. Install a speech model when prompted. `base.en` is a good first choice for English.
+4. Grant microphone permission.
+5. On macOS, grant Accessibility permission if you want Spiel to paste text into the active app automatically.
+6. Put your cursor in a text field.
+7. Press the global hotkey, speak, then press it again to stop.
+
+The default hotkey is `Cmd+Alt+D` on macOS.
+
+## How Dictation Works
+
+Spiel is a toggle:
+
+1. Start dictation from the hotkey, menu bar, or app window.
+2. Speak normally.
+3. Stop dictation with the same control.
+4. Spiel transcribes locally.
+5. Spiel inserts the text at the cursor when supported.
+
+If automatic paste is unavailable, Spiel leaves the transcript on the clipboard so you can paste manually.
+
+## Models
+
+Spiel supports English-only and multilingual Whisper model families:
+
+- English-only: `tiny.en`, `base.en`, `small.en`
+- Multilingual: `tiny`, `base`, `small`, `medium`
+
+Smaller models are faster and use less memory. Larger models can be more accurate but need more disk space, RAM, and CPU time.
+
+## Privacy
+
+Spiel is designed for local-first dictation:
+
+- Audio capture is processed locally.
+- Transcription runs through local Whisper models.
+- No transcript or audio telemetry is sent by the app.
+- Network access is used for model downloads and optional checksum manifest checks.
+- Model paths are validated to reject unsafe symlink or traversal targets.
+
+## Platform Notes
+
+macOS is the primary supported platform. It supports microphone capture, global hotkey dictation, and Accessibility-assisted paste.
+
+Windows and Linux builds are available from the release workflow, but cursor insertion behavior may be clipboard-first depending on platform permissions and desktop environment support.
+
+## Build From Source
+
+Requirements:
+
+- Node.js 22+
+- Rust stable
+- Platform build tools required by Tauri
+
+Install dependencies:
+
 ```bash
 npm install
+```
+
+Run in development:
+
+```bash
 npm run tauri dev
 ```
 
-## Packaging
+Build the frontend:
 
-Build the native package for the current operating system:
+```bash
+npm run build
+```
+
+Run Rust tests:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Build a native package for the current operating system:
 
 ```bash
 npm run package
 ```
 
-Platform-specific local commands:
+Platform-specific package commands:
 
 ```bash
 npm run package:mac
@@ -79,126 +137,61 @@ npm run package:windows
 npm run package:linux
 ```
 
-Native Windows and Linux installers should be built on Windows and Linux runners. The
-`Package apps` GitHub Actions workflow builds and uploads:
+Local macOS artifacts are written to `release/artifacts/`.
 
-- `Spiel-macOS-arm64`: Apple Silicon `.app` and `.dmg`
-- `Spiel-macOS-x64`: Intel `.app` and `.dmg`
+## Release Builds
+
+The `Package apps` GitHub Actions workflow builds and uploads:
+
+- `Spiel-macOS-arm64`: Apple Silicon `.app.zip` and `.dmg`
+- `Spiel-macOS-x64`: Intel `.app.zip` and `.dmg`
 - `Spiel-Windows`: `.msi` and NSIS `.exe`
 - `Spiel-Linux`: `.AppImage` and `.deb`
 
-Publishing a GitHub release also runs the workflow and attaches those files to the
-release after each platform build finishes.
+Publishing a GitHub release runs the workflow and attaches those files to the release after each platform build finishes.
 
-Local macOS artifacts are written to `release/artifacts/`.
+## Useful Environment Variables
 
-These local artifacts are unsigned/not notarized unless the host environment is
-configured with platform signing credentials.
-
-## Configuration Surface
-
-- `hotkey`
-- `model`
-- `language`
-- `auto_paste`
-- `restore_clipboard`
-- `keep_model_loaded`
-- `transcription_threads`
-- `max_seconds`
-
-### Language handling
-
-- `auto` is always accepted.
-- BCP-47/legacy regional tags like `en-US` normalize to `en`.
-- Invalid values fall back to `auto` or model-safe defaults.
-
-## Backend Commands Exposed to the UI
-
-- `get_status`
-- `get_config`
-- `get_perf_snapshot`
-- `clear_perf_samples`
-- `update_config`
-- `list_models`
-- `get_readiness`
-- `get_startup_health`
-- `download_model`
-- `delete_model`
-- `cancel_download`
-- `toggle_dictation`
-- `unload_model_from_memory`
-- `warm_up_model`
-- `accessibility_status`
-- `request_accessibility`
-- `show_settings`
-
-## Runtime Environment Knobs
-
-- `SPIEL_WHISPER_THREADS` (`1..16`) to override model thread count.
-- `SPIEL_PRE_PASTE_DELAY_MS` and `SPIEL_RESTORE_DELAY_MS` for paste timing.
-- `SPIEL_MODEL_DIR` for custom local model storage.
-- `SPIEL_ACCESSIBILITY_POLL_MS` to tune permission polling (default 1000ms, range 250–30000).
-- `SPIEL_PART_CLEANUP_MS` for stale `.part` file cleanup during startup/download (milliseconds, 0 keeps all, defaults to 24h).
-- `SPIEL_PROFILE` and `SPIEL_LATENCY_BUDGET_MS` for profiling behavior.
-- `SPIEL_DOWNLOAD_CONNECT_TIMEOUT_MS` and `SPIEL_DOWNLOAD_TIMEOUT_MS` for download robustness.
-- `SPIEL_DOWNLOAD_RETRIES` (`0..8`) for transient download retries (default `2` retries).
-- `SPIEL_DOWNLOAD_RETRY_BACKOFF_MS` (`100..30000`, default `250`) for initial retry delay before each attempt.
-- `SPIEL_MODEL_MANIFEST_URL` for detached checksum manifests keyed by filename.
-- `SPIEL_MAINTENANCE_POLL_MS` for background stale-artifact cleanup cadence.
-- `SPIEL_WARMUP_ON_START` to pre-validate/preload the current model on launch.
-
-### Integrity behavior
-
-- Registry SHA-256 pins are honored when set.
-- Optional sidecar checksums (`<model>.sha256`) are auto-used for local files when present.
-
-## Non-macOS behavior
-
-- `playback/copy` auto-paste is macOS-only; non-macOS builds still provide clipboard fallback and clearly surface when explicit permission-based paste is unavailable.
-- Accessibility trust prompts and status are no-ops on non-macOS platforms.
-
-## Architecture
-
-- `src/main.ts` and `src/styles.css`: front-end panel and UX state orchestration.
-- `src-tauri/src/`: backend engine for capture, transcription, insertion, settings, model downloads, and status.
-- `src-tauri/src/commands.rs`: IPC command boundary used by the UI.
-
-## Performance and Memory
-
-- Capture buffer is bounded by target sample rate (`16 kHz`) and recording window.
-- In-callback downmix + downsample reduces worker copy volume.
-- Optional “keep model in RAM” controls let you trade startup latency for memory footprint.
-- Dictation duration is clamped to sane values (`5..600` seconds).
-- Readiness diagnostics report current model-store footprint to support disk/memory planning.
-- Perf diagnostics now include stage averages, p50/p95 totals, paste-vs-clipboard outcomes, and download latency samples.
-
-## Security & Privacy
-
-- No audio files are written by normal operation.
-- Only model files are written during explicit model download.
-- Clipboard insertion never assumes Accessibility trust; it falls back to manual paste if needed.
-- Model paths reject symlinks and parent directory traversal.
-- Download and settings writes are bounded with validation and cleanup on error.
-
-## Verification
-
-```bash
-npm run build
-cd src-tauri
-cargo fmt --check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
-```
+- `SPIEL_MODEL_DIR`: custom local model storage directory.
+- `SPIEL_WHISPER_THREADS`: override transcription thread count.
+- `SPIEL_WARMUP_ON_START`: preload the current model on launch.
+- `SPIEL_PRE_PASTE_DELAY_MS`: delay before paste.
+- `SPIEL_RESTORE_DELAY_MS`: delay before restoring the clipboard.
+- `SPIEL_DOWNLOAD_RETRIES`: retry count for transient model download failures.
+- `SPIEL_DOWNLOAD_RETRY_BACKOFF_MS`: initial retry backoff.
+- `SPIEL_DOWNLOAD_CONNECT_TIMEOUT_MS`: model download connection timeout.
+- `SPIEL_DOWNLOAD_TIMEOUT_MS`: model download total timeout.
+- `SPIEL_MODEL_MANIFEST_URL`: optional checksum manifest URL.
 
 ## Troubleshooting
 
-- **I can’t start with hotkey**: likely key conflict; set another sequence in settings.
-- **Model install says partial/corrupt**: delete and repair from model list, then re-download.
-- **Auto-paste does nothing**: Accessibility must be trusted.
-- **Transcription is slow**: switch to multilingual `small`/`base` trade-off, or lower threads/disable `keep_model_loaded` for memory.
-- **Install is repeatedly failing with checksum errors**: remove corrupted model + sidecar and retry. Sidecar validation is intentionally strict to prevent silent corruption.
-- **First transcription feels slow after launch**: use `Warm Current Model`, or enable `keep_model_loaded` and `SPIEL_WARMUP_ON_START=1`.
+### macOS says the app cannot be verified
 
-## Roadmap
+The current builds are not notarized. Use `System Settings -> Privacy & Security -> Open Anyway`, or remove the quarantine flag with `xattr` after copying the app to Applications.
 
-The next engineering pass is tracked in `docs/RELEASE_READINESS_NEXT_SESSION_2026-06-07.md`.
+### The hotkey does nothing
+
+Another app may already own the shortcut. Open Spiel settings and choose a different hotkey.
+
+### Dictation records but does not paste
+
+On macOS, automatic paste requires Accessibility permission. If Accessibility is not granted, Spiel should leave the transcript on the clipboard for manual paste.
+
+### Transcription is slow
+
+Use a smaller model, reduce transcription threads, or enable model warm-up/keep-loaded behavior if you have enough memory.
+
+### Model install says partial or corrupt
+
+Delete the model from Spiel and download it again. If you use sidecar checksums, make sure the `.sha256` file matches the model exactly.
+
+## Repository Layout
+
+- `src/`: Tauri frontend.
+- `src-tauri/src/`: Rust backend for capture, transcription, insertion, model management, settings, and IPC commands.
+- `scripts/`: packaging helpers.
+- `.github/workflows/package.yml`: release packaging workflow.
+
+## License
+
+No license has been declared yet.
