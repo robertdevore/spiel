@@ -1,6 +1,6 @@
 [package]
 name = "spiel"
-version = "1.0.0-0"
+version = "1.0.0"
 description = "Local-first push-to-talk dictation for macOS. Speak, and it lands where your cursor is."
 authors = ["Spiel"]
 edition = "2021"
