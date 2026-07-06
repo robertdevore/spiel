@@ -194,4 +194,4 @@ Delete the model from Spiel and download it again. If you use sidecar checksums,
 
 ## License
 
-No license has been declared yet.
+MIT. See `LICENSE`.
