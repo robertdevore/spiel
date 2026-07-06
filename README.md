@@ -86,6 +86,9 @@ Native Windows and Linux installers should be built on Windows and Linux runners
 - `Spiel-Windows`: `.msi` and NSIS `.exe`
 - `Spiel-Linux`: `.AppImage` and `.deb`
 
+Publishing a GitHub release also runs the workflow and attaches those files to the
+release after each platform build finishes.
+
 Local macOS artifacts are written to `release/artifacts/`.
 
 These local artifacts are unsigned/not notarized unless the host environment is
