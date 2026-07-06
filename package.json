@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "package": "tauri build",
+    "package:mac": "bash scripts/package-macos.sh",
+    "package:windows": "tauri build --bundles nsis,msi",
+    "package:linux": "tauri build --bundles appimage,deb"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"

@@ -63,6 +63,34 @@ npm install
 npm run tauri dev
 ```
 
+## Packaging
+
+Build the native package for the current operating system:
+
+```bash
+npm run package
+```
+
+Platform-specific local commands:
+
+```bash
+npm run package:mac
+npm run package:windows
+npm run package:linux
+```
+
+Native Windows and Linux installers should be built on Windows and Linux runners. The
+`Package apps` GitHub Actions workflow builds and uploads:
+
+- `Spiel-macOS`: `.app` and `.dmg`
+- `Spiel-Windows`: `.msi` and NSIS `.exe`
+- `Spiel-Linux`: `.AppImage` and `.deb`
+
+Local macOS artifacts are written to `release/artifacts/`.
+
+These local artifacts are unsigned/not notarized unless the host environment is
+configured with platform signing credentials.
+
 ## Configuration Surface
 
 - `hotkey`

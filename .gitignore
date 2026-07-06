@@ -27,6 +27,7 @@ Desktop.ini
 *.tsbuildinfo
 *.log
 npm-debug.log*
+release/
 
 # ── macOS bundles (not committed) ───────────────────────────
 *.app
