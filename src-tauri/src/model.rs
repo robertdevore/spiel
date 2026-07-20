@@ -375,13 +375,22 @@ pub fn cleanup_stale_model_artifacts(model_dir: &Path, older_than: Duration) -> 
             continue;
         }
 
+        let orphan_sidecar = is_sidecar
+            && match sidecar_target_path(&path) {
+                Some(target) => !target.exists(),
+                None => true,
+            };
+        if is_sidecar && orphan_sidecar && std::fs::remove_file(&path).is_ok() {
+            report.removed_sidecar_files = report.removed_sidecar_files.saturating_add(1);
+            continue;
+        }
+        if is_sidecar {
+            continue;
+        }
+
         if older_than.is_zero() {
             if std::fs::remove_file(&path).is_ok() {
-                if is_part {
-                    report.removed_partial_files = report.removed_partial_files.saturating_add(1);
-                } else {
-                    report.removed_sidecar_files = report.removed_sidecar_files.saturating_add(1);
-                }
+                report.removed_partial_files = report.removed_partial_files.saturating_add(1);
             }
             continue;
         }
@@ -392,17 +401,8 @@ pub fn cleanup_stale_model_artifacts(model_dir: &Path, older_than: Duration) -> 
                 .ok()
                 .map(|age| age > older_than)
         });
-        let orphan_sidecar = is_sidecar
-            && match sidecar_target_path(&path) {
-                Some(target) => !target.exists(),
-                None => true,
-            };
-        if (is_stale.unwrap_or(false) || orphan_sidecar) && std::fs::remove_file(&path).is_ok() {
-            if is_part {
-                report.removed_partial_files = report.removed_partial_files.saturating_add(1);
-            } else {
-                report.removed_sidecar_files = report.removed_sidecar_files.saturating_add(1);
-            }
+        if is_stale.unwrap_or(false) && std::fs::remove_file(&path).is_ok() {
+            report.removed_partial_files = report.removed_partial_files.saturating_add(1);
         }
     }
 
@@ -455,7 +455,7 @@ pub fn download(
             spec,
             &part_path,
             &final_path,
-            resolved_checksum.as_deref(),
+            &resolved_checksum,
             &mut on_progress,
             &should_cancel,
         );
@@ -477,7 +477,7 @@ fn download_once(
     spec: &ModelSpec,
     part_path: &Path,
     final_path: &Path,
-    expected_checksum: Option<&str>,
+    resolved_checksum: &ResolvedChecksum,
     on_progress: &mut impl FnMut(u64, Option<u64>),
     should_cancel: &impl Fn() -> bool,
 ) -> Result<DownloadSummary> {
@@ -535,16 +535,17 @@ fn download_once(
         return Err(e);
     }
 
-    validate_file_with_checksum(part_path, spec, expected_checksum).inspect_err(|_| {
-        let _ = std::fs::remove_file(part_path);
-    })?;
+    validate_file_with_checksum(part_path, spec, resolved_checksum.checksum.as_deref())
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(part_path);
+        })?;
 
     std::fs::rename(part_path, final_path)
         .map_err(|e| SpielError::Download(format!("could not finalize model: {e}")))?;
     Ok(DownloadSummary {
         downloaded_bytes: downloaded,
         expected_bytes: total,
-        checksum_source: checksum_source_label(spec, expected_checksum).to_string(),
+        checksum_source: resolved_checksum.source.to_string(),
     })
 }
 
@@ -649,6 +650,10 @@ fn expected_checksum(
 fn sidecar_path(model_path: &Path) -> std::path::PathBuf {
     let file_name = model_path.file_name().unwrap_or_default();
     model_path.with_file_name(format!("{}.sha256", file_name.to_string_lossy()))
+}
+
+pub fn checksum_sidecar_path(model_path: &Path) -> std::path::PathBuf {
+    sidecar_path(model_path)
 }
 
 fn sidecar_target_path(sidecar_path: &Path) -> Option<std::path::PathBuf> {
@@ -800,19 +805,40 @@ pub fn classify_download_error(err: &SpielError) -> &'static str {
     }
 }
 
+struct ResolvedChecksum {
+    checksum: Option<String>,
+    source: &'static str,
+}
+
 fn resolve_download_checksum(
     client: &reqwest::blocking::Client,
     spec: &ModelSpec,
-) -> Result<Option<String>> {
+) -> Result<ResolvedChecksum> {
     if !spec.sha256.is_empty() {
-        return Ok(Some(spec.sha256.to_lowercase()));
+        return Ok(ResolvedChecksum {
+            checksum: Some(spec.sha256.to_lowercase()),
+            source: "registry",
+        });
     }
 
     if let Some(checksum) = fetch_manifest_checksum(client, spec)? {
-        return Ok(Some(checksum));
+        return Ok(ResolvedChecksum {
+            checksum: Some(checksum),
+            source: "manifest",
+        });
     }
 
-    fetch_remote_sidecar_checksum(client, spec)
+    if let Some(checksum) = fetch_remote_sidecar_checksum(client, spec)? {
+        return Ok(ResolvedChecksum {
+            checksum: Some(checksum),
+            source: "remote_sidecar",
+        });
+    }
+
+    Ok(ResolvedChecksum {
+        checksum: None,
+        source: "none",
+    })
 }
 
 fn fetch_manifest_checksum(
@@ -879,24 +905,6 @@ fn normalize_checksum_token(token: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_ascii_lowercase())
-}
-
-fn checksum_source_label(spec: &ModelSpec, expected_checksum: Option<&str>) -> &'static str {
-    if !spec.sha256.is_empty() {
-        "registry"
-    } else if expected_checksum.is_some() {
-        if std::env::var("SPIEL_MODEL_MANIFEST_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some()
-        {
-            "manifest"
-        } else {
-            "remote_sidecar"
-        }
-    } else {
-        "none"
-    }
 }
 
 #[cfg(test)]
@@ -1073,6 +1081,26 @@ mod tests {
         let report = cleanup_stale_model_artifacts(&dir, Duration::from_secs(60));
         assert_eq!(report.removed_sidecar_files, 1);
         assert!(!orphan_sidecar.exists());
+    }
+
+    #[test]
+    fn stale_cleanup_keeps_checksum_sidecars_for_existing_models() {
+        let dir =
+            std::env::temp_dir().join(format!("spiel_model_sidecar_keep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let model_path = dir.join("kept.bin");
+        let sidecar = dir.join("kept.bin.sha256");
+        let _ = std::fs::write(&model_path, b"model");
+        let _ = std::fs::write(&sidecar, "00".repeat(32));
+
+        let report = cleanup_stale_model_artifacts(&dir, Duration::ZERO);
+        assert_eq!(report.removed_sidecar_files, 0);
+        assert!(sidecar.exists());
+
+        let _ = std::fs::remove_file(&model_path);
+        let _ = std::fs::remove_file(&sidecar);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

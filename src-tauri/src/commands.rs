@@ -420,6 +420,13 @@ pub fn download_model(
     let Some(spec) = model::spec(&model_id) else {
         return Err(format!("Unknown model '{model_id}'."));
     };
+    {
+        let dl = state.download.lock().unwrap();
+        if dl.active {
+            return Err("A download is already in progress.".into());
+        }
+    }
+
     let partial_ttl =
         model::parse_part_cleanup_ms(std::env::var("SPIEL_PART_CLEANUP_MS").ok().as_deref(), 0);
     model::cleanup_stale_model_artifacts(&state.paths.model_dir, partial_ttl);
@@ -553,6 +560,7 @@ pub fn delete_model(state: State<AppState>, model_id: String) -> Result<(), Stri
     }
 
     std::fs::remove_file(&model_path).map_err(|e| format!("Failed to remove '{model_id}': {e}"))?;
+    let _ = std::fs::remove_file(model::checksum_sidecar_path(&model_path));
 
     let part_path = state
         .paths
