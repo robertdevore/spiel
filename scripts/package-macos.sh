@@ -18,6 +18,13 @@ BASE_NAME="Spiel_${VERSION}_macOS_${ARCH}"
 
 npm run tauri -- build --bundles app
 
+TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+HELPER_SRC="src-tauri/binaries/spiel-transcribe-$TARGET_TRIPLE"
+HELPER_DST="$APP_PATH/Contents/Resources/spiel-transcribe-$TARGET_TRIPLE"
+mkdir -p "$(dirname "$HELPER_DST")"
+cp "$HELPER_SRC" "$HELPER_DST"
+rm -f "$APP_PATH/Contents/MacOS/spiel-transcribe"
+
 rm -rf "$DMG_ROOT"
 mkdir -p "$DMG_ROOT" "$ARTIFACT_DIR"
 rm -f "$ARTIFACT_DIR/${BASE_NAME}.dmg" "$ARTIFACT_DIR/${BASE_NAME}.app.zip"

@@ -97,6 +97,11 @@ interface PerfSnapshot {
   } | null;
 }
 
+interface MemorySnapshot {
+  rss_bytes: number;
+  source: string;
+}
+
 interface PerfEvent {
   capture_ms: number;
   transcribe_ms: number;
@@ -161,6 +166,7 @@ let models: ModelView[] = [];
 let lastTranscript = "";
 let lastError = "";
 let perf: PerfSnapshot | null = null;
+let memory: MemorySnapshot | null = null;
 let readiness: ReadinessSnapshot | null = null;
 let startupHealth: StartupHealthSnapshot | null = null;
 let refreshInFlight = false;
@@ -198,8 +204,8 @@ const MEMORY_PROFILES: MemoryProfile[] = [
   {
     id: "low",
     label: "Low Memory",
-    summary: "Tiny English model, unload after each run, 1 thread.",
-    patch: { model: "tiny.en", keep_model_loaded: false, transcription_threads: 1 },
+    summary: "Tiny English model, unload after each run, 1 thread, 60s cap.",
+    patch: { model: "tiny.en", keep_model_loaded: false, transcription_threads: 1, max_seconds: 60 },
   },
   {
     id: "balanced",
@@ -252,6 +258,7 @@ async function refreshAll() {
       invoke<StartupHealthSnapshot>("get_startup_health"),
     ]);
     perf = await invoke<PerfSnapshot>("get_perf_snapshot");
+    memory = await invoke<MemorySnapshot>("get_memory_snapshot");
     syncRecordingClock();
   } catch (e) {
     console.error("Backend unavailable:", e);
@@ -279,6 +286,7 @@ async function refreshStatusOnly() {
 async function refreshPerfOnly() {
   try {
     perf = await invoke<PerfSnapshot>("get_perf_snapshot");
+    memory = await invoke<MemorySnapshot>("get_memory_snapshot");
     render();
   } catch (e) {
     console.error("Perf refresh failed:", e);
@@ -358,7 +366,7 @@ function render() {
   app.appendChild(transcriptCard());
   app.appendChild(modelsCard());
   app.appendChild(settingsCard(c));
-  if (perf?.enabled) app.appendChild(perfCard(perf));
+  if (perf?.enabled) app.appendChild(perfCard(perf, memory));
   app.appendChild(privacyEl());
 }
 
@@ -850,10 +858,17 @@ function privacyEl(): HTMLElement {
   return el;
 }
 
-function perfCard(p: PerfSnapshot): HTMLElement {
+function perfCard(p: PerfSnapshot, m: MemorySnapshot | null): HTMLElement {
   const card = document.createElement("div");
   card.className = "card";
   card.innerHTML = `<p class="section-title">Performance Profile</p>`;
+
+  if (m) {
+    const rss = document.createElement("div");
+    rss.className = "privacy";
+    rss.textContent = `Current app RSS: ${fmtBytes(m.rss_bytes)} (${m.source})`;
+    card.appendChild(rss);
+  }
 
   const summary = document.createElement("div");
   summary.className = "privacy";

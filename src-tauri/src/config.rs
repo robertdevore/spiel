@@ -44,8 +44,8 @@ impl Default for Config {
             auto_paste: true,
             restore_clipboard: true,
             keep_model_loaded: false,
-            transcription_threads: 2,
-            max_seconds: 120,
+            transcription_threads: 1,
+            max_seconds: 60,
         }
     }
 }

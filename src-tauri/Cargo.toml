@@ -5,10 +5,19 @@ description = "Local-first push-to-talk dictation for macOS. Speak, and it lands
 authors = ["Spiel"]
 edition = "2021"
 rust-version = "1.80"
+default-run = "spiel"
 
 [lib]
 name = "spiel_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "spiel"
+path = "src/main.rs"
+
+[[bin]]
+name = "spiel-transcribe"
+path = "src/bin/spiel-transcribe.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -45,3 +54,5 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 [profile.release]
 strip = true
 lto = true
+codegen-units = 1
+panic = "abort"

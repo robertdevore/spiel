@@ -2,7 +2,7 @@
 //!
 //! Shape: a menu-bar (Accessory) app. A global hotkey toggles recording; on stop we
 //! transcribe locally with whisper.cpp and paste the result at the cursor. The only
-//! window is a settings/status panel, hidden by default and shown from the tray.
+//! settings/status panel is created only when opened so idle RAM stays low.
 
 mod accessibility;
 mod audio;
@@ -12,6 +12,7 @@ mod dictation;
 mod error;
 mod focus;
 mod insert;
+mod memory;
 mod model;
 mod state;
 mod whisper;
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -84,23 +85,11 @@ pub fn run() {
                 let _ = register_hotkey(&handle, &Config::default().hotkey);
             }
 
-            // Closing the settings window hides it; the app keeps running in the menu bar.
-            if let Some(win) = app.get_webview_window("main") {
-                let win_clone = win.clone();
-                win.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = win_clone.hide();
-                    }
-                });
-            }
-
             dictation::emit_status(&handle);
             emit_startup_health(handle.clone(), cleanup_report.clone());
             start_model_store_maintenance(handle.clone(), ttl);
             start_optional_model_warmup(handle.clone());
 
-            start_accessibility_poll(handle.clone());
             focus::start_tracker(handle.clone());
             Ok(())
         })
@@ -110,6 +99,7 @@ pub fn run() {
             commands::get_readiness,
             commands::get_startup_health,
             commands::get_perf_snapshot,
+            commands::get_memory_snapshot,
             commands::clear_perf_samples,
             commands::update_config,
             commands::list_models,
@@ -214,74 +204,73 @@ fn validate_path_components(path: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn start_accessibility_poll(app: tauri::AppHandle) {
-    let poll_interval = std::env::var("SPIEL_ACCESSIBILITY_POLL_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|value| value.clamp(250, 30_000))
-        .unwrap_or(1_000);
-
-    std::thread::spawn(move || {
-        let mut last = accessibility::is_trusted();
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(poll_interval));
-            let current = accessibility::is_trusted();
-            if current != last {
-                last = current;
-                dictation::emit_status(&app);
-            }
-        }
-    });
-}
-
 fn emit_startup_health(app: tauri::AppHandle, cleanup_report: model::CleanupReport) {
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(350));
-        if let Some(state) = app.try_state::<AppState>() {
-            let snapshot = commands::build_startup_health(&state, cleanup_report);
-            let _ = app.emit("startup-health", snapshot);
-        }
-    });
+    let _ = std::thread::Builder::new()
+        .name("spiel-startup-health".into())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            if let Some(state) = app.try_state::<AppState>() {
+                let snapshot = commands::build_startup_health(&state, cleanup_report);
+                let _ = app.emit("startup-health", snapshot);
+            }
+        });
 }
 
 fn start_model_store_maintenance(app: tauri::AppHandle, older_than: std::time::Duration) {
+    if !env_flag("SPIEL_MAINTENANCE_POLL") {
+        return;
+    }
     let interval_ms = std::env::var("SPIEL_MAINTENANCE_POLL_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(|value| value.clamp(60_000, 86_400_000))
         .unwrap_or(15 * 60 * 1_000);
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
-        if let Some(state) = app.try_state::<AppState>() {
-            let report = model::cleanup_stale_model_artifacts(&state.paths.model_dir, older_than);
-            if report.removed_partial_files > 0 || report.removed_sidecar_files > 0 {
-                state.clear_model_install_cache();
-                let _ = app.emit(
-                    "startup-health",
-                    commands::build_startup_health(&state, report),
-                );
+    let _ = std::thread::Builder::new()
+        .name("spiel-model-maintenance".into())
+        .stack_size(64 * 1024)
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            if let Some(state) = app.try_state::<AppState>() {
+                let report =
+                    model::cleanup_stale_model_artifacts(&state.paths.model_dir, older_than);
+                if report.removed_partial_files > 0 || report.removed_sidecar_files > 0 {
+                    state.clear_model_install_cache();
+                    let _ = app.emit(
+                        "startup-health",
+                        commands::build_startup_health(&state, report),
+                    );
+                }
             }
-        }
-    });
+        });
 }
 
 fn start_optional_model_warmup(app: tauri::AppHandle) {
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let Some(state) = app.try_state::<AppState>() else {
-            return;
-        };
-        let config = state.config.lock().unwrap().clone();
-        let should_warm = config.keep_model_loaded
-            || std::env::var("SPIEL_WARMUP_ON_START")
-                .ok()
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-                .unwrap_or(false);
-        if !should_warm {
-            return;
-        }
-        let _ = dictation::warm_up_current_model(&state, config.keep_model_loaded);
-    });
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let config = state.config.lock().unwrap().clone();
+    let should_warm = config.keep_model_loaded || env_flag("SPIEL_WARMUP_ON_START");
+    if !should_warm {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("spiel-model-warmup".into())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let _ = dictation::warm_up_current_model(&state, config.keep_model_loaded);
+        });
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 /// Validate a hotkey string without registering it. Used to reject bad input early.

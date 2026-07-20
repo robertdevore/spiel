@@ -18,22 +18,25 @@ pub fn start_tracker(app: AppHandle) {
     let poll_interval = std::env::var("SPIEL_FOCUS_POLL_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .map(|value| value.clamp(100, 5_000))
-        .unwrap_or(250);
+        .map(|value| value.clamp(250, 5_000))
+        .unwrap_or(1_000);
     let own_pid = std::process::id() as i32;
 
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(poll_interval));
-        let Some(state) = app.try_state::<AppState>() else {
-            continue;
-        };
-        let Some(target) = frontmost_target() else {
-            continue;
-        };
-        if should_remember(target, own_pid) {
-            *state.last_focus_target.lock().unwrap() = Some(target);
-        }
-    });
+    let _ = std::thread::Builder::new()
+        .name("spiel-focus-tracker".into())
+        .stack_size(64 * 1024)
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(poll_interval));
+            let Some(state) = app.try_state::<AppState>() else {
+                continue;
+            };
+            let Some(target) = frontmost_target() else {
+                continue;
+            };
+            if should_remember(target, own_pid) {
+                *state.last_focus_target.lock().unwrap() = Some(target);
+            }
+        });
 }
 
 pub fn remember_current_frontmost(app: &AppHandle) {

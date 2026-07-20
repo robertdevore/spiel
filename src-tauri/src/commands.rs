@@ -4,8 +4,9 @@
 use crate::config::Config;
 use crate::dictation;
 use crate::error::{to_command_error, Result as SpielResult};
+use crate::memory::MemorySnapshot;
 use crate::state::{AppState, DownloadPerfSample, PerfSnapshot, StatusSnapshot};
-use crate::{accessibility, model};
+use crate::{accessibility, memory, model};
 use serde::Serialize;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -306,6 +307,11 @@ pub fn get_perf_snapshot(state: State<AppState>) -> PerfSnapshot {
 }
 
 #[tauri::command]
+pub fn get_memory_snapshot() -> MemorySnapshot {
+    memory::snapshot()
+}
+
+#[tauri::command]
 pub fn clear_perf_samples(state: State<AppState>) {
     state.clear_perf_samples();
 }
@@ -594,11 +600,12 @@ pub fn accessibility_status() -> bool {
 
 /// Trigger the macOS prompt and open the settings pane to guide the user.
 #[tauri::command]
-pub fn request_accessibility() -> bool {
+pub fn request_accessibility(app: AppHandle) -> bool {
     let trusted = accessibility::prompt_if_needed();
     if !trusted {
         accessibility::open_settings_pane();
     }
+    dictation::emit_status(&app);
     trusted
 }
 

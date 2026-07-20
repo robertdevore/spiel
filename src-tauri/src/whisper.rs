@@ -101,14 +101,16 @@ pub fn transcribe_in_worker(
     language: &str,
     configured_threads: u8,
 ) -> Result<String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| SpielError::Transcription(format!("cannot locate Spiel executable: {e}")))?;
+    let worker = worker_command()?;
     let model_path = model_path
         .to_str()
         .ok_or_else(|| SpielError::Model("model path is not valid UTF-8".into()))?;
 
-    let mut child = Command::new(exe)
-        .arg("--spiel-transcribe-worker")
+    let mut command = Command::new(worker.path);
+    if worker.needs_app_worker_flag {
+        command.arg("--spiel-transcribe-worker");
+    }
+    let mut child = command
         .arg(model_path)
         .arg(model_id)
         .arg(language)
@@ -150,6 +152,45 @@ pub fn transcribe_in_worker(
         .map_err(|e| SpielError::Transcription(format!("worker returned invalid UTF-8: {e}")))
 }
 
+struct WorkerCommand {
+    path: std::path::PathBuf,
+    needs_app_worker_flag: bool,
+}
+
+fn worker_command() -> Result<WorkerCommand> {
+    let exe = std::env::current_exe()
+        .map_err(|e| SpielError::Transcription(format!("cannot locate Spiel executable: {e}")))?;
+    if let Some(helper) = candidate_helper_paths(&exe)
+        .into_iter()
+        .find(|path| path.is_file())
+    {
+        return Ok(WorkerCommand {
+            path: helper,
+            needs_app_worker_flag: false,
+        });
+    }
+    Ok(WorkerCommand {
+        path: exe,
+        needs_app_worker_flag: true,
+    })
+}
+
+fn candidate_helper_paths(exe: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = exe.parent() {
+        paths.push(dir.join(helper_binary_name()));
+        paths.push(dir.join(format!("{}-{}", helper_binary_name(), target_triple())));
+        if let Some(contents_dir) = dir.parent() {
+            paths.push(contents_dir.join("Resources").join(format!(
+                "{}-{}",
+                helper_binary_name(),
+                target_triple()
+            )));
+        }
+    }
+    paths
+}
+
 pub fn run_worker_from_args(args: &[String]) -> bool {
     if args.get(1).map(String::as_str) != Some("--spiel-transcribe-worker") {
         return false;
@@ -168,18 +209,23 @@ pub fn run_worker_from_args(args: &[String]) -> bool {
     }
 }
 
-fn run_worker(args: &[String]) -> Result<String> {
+pub fn run_worker(args: &[String]) -> Result<String> {
+    let offset = if args.get(1).map(String::as_str) == Some("--spiel-transcribe-worker") {
+        1
+    } else {
+        0
+    };
     let model_path = args
-        .get(2)
+        .get(offset + 1)
         .ok_or_else(|| SpielError::Transcription("worker missing model path".into()))?;
     let model_id = args
-        .get(3)
+        .get(offset + 2)
         .ok_or_else(|| SpielError::Transcription("worker missing model id".into()))?;
     let language = args
-        .get(4)
+        .get(offset + 3)
         .ok_or_else(|| SpielError::Transcription("worker missing language".into()))?;
     let threads = args
-        .get(5)
+        .get(offset + 4)
         .and_then(|raw| raw.parse::<u8>().ok())
         .unwrap_or(1);
 
@@ -211,6 +257,42 @@ fn low_memory_context_params() -> WhisperContextParameters<'static> {
 fn audio_context_for_samples(sample_count: usize) -> i32 {
     let seconds = (sample_count as f32 / 16_000.0).ceil() as i32;
     (seconds * 50).clamp(150, 1500)
+}
+
+fn helper_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "spiel-transcribe.exe"
+    } else {
+        "spiel-transcribe"
+    }
+}
+
+fn target_triple() -> &'static str {
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    {
+        "x86_64-apple-darwin"
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        "aarch64-apple-darwin"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    {
+        "x86_64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    {
+        "x86_64-pc-windows-msvc"
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_os = "macos"),
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux"),
+        all(target_arch = "x86_64", target_os = "windows")
+    )))]
+    {
+        "unknown"
+    }
 }
 
 /// Tidy Whisper output: drop leading/trailing whitespace and the bracketed non-speech
