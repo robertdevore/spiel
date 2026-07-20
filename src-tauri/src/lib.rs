@@ -16,6 +16,10 @@ mod model;
 mod state;
 mod whisper;
 
+pub fn run_transcription_worker_from_args(args: &[String]) -> bool {
+    whisper::run_worker_from_args(args)
+}
+
 use config::{Config, Paths};
 use state::AppState;
 use std::path::Component;

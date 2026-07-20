@@ -5,7 +5,7 @@
 
 use crate::error::SpielError;
 use crate::state::{AppState, PerfSample, Phase};
-use crate::whisper::Transcriber;
+use crate::whisper::{self, Transcriber};
 use crate::{audio, focus, insert, model};
 use serde::Serialize;
 use std::time::Instant;
@@ -164,26 +164,13 @@ fn process_capture(
     };
 
     let transcribe_started_at = Instant::now();
-    let transcriber = match ensure_transcriber(&state) {
-        Ok(t) => t,
-        Err(e) => {
-            state.record_perf_sample(PerfSample {
-                wall_time_ms: 0,
-                capture_ms,
-                transcribe_ms: transcribe_started_at.elapsed().as_millis() as u64,
-                insert_ms: 0,
-                total_ms: stop_pressed_at.elapsed().as_millis() as u64,
-                audio_samples: sample_count,
-                text_chars: 0,
-                outcome: "model_load_error".into(),
-            });
-            state.set_phase(Phase::Error, Some(e.to_string()));
-            emit_status(app);
-            return;
-        }
-    };
-
-    let text = match transcriber.transcribe(&capture.samples, &language, threads) {
+    let text = match transcribe_capture(
+        &state,
+        &capture.samples,
+        &language,
+        threads,
+        keep_model_loaded,
+    ) {
         Ok(t) => t,
         Err(e) => {
             state.record_perf_sample(PerfSample {
@@ -203,9 +190,6 @@ fn process_capture(
     };
     let transcribe_ms = transcribe_started_at.elapsed().as_millis() as u64;
     drop(capture);
-    if !keep_model_loaded {
-        clear_model_cache(&state);
-    }
 
     if text.trim().is_empty() {
         state.record_perf_sample(PerfSample {
@@ -291,6 +275,25 @@ fn process_capture(
         );
         emit_status(&app);
     });
+}
+
+fn transcribe_capture(
+    state: &AppState,
+    samples: &[f32],
+    language: &str,
+    threads: u8,
+    keep_model_loaded: bool,
+) -> crate::error::Result<String> {
+    let model_id = state.config.lock().unwrap().model.clone();
+    let spec = model::spec(&model_id).ok_or(SpielError::ModelMissing)?;
+    let path = state.paths.model_path(spec.filename);
+
+    if keep_model_loaded {
+        return ensure_transcriber(state)?.transcribe(samples, language, threads);
+    }
+
+    clear_model_cache(state);
+    whisper::transcribe_in_worker(&path, &model_id, samples, language, threads)
 }
 
 /// Return the cached model context, loading (and caching) it if absent or stale.

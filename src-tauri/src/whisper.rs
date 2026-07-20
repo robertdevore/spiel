@@ -1,11 +1,14 @@
 //! Local transcription via embedded whisper.cpp (the `whisper-rs` crate).
 //!
-//! The model is loaded once and cached (it's the expensive part — ~150 MB into RAM).
-//! Each transcription creates a cheap per-call state, so concurrent calls are safe and
-//! the loaded context is reused. Everything runs on-device; there is no network path.
+//! By default dictation runs in a short-lived worker process so Whisper's model/state
+//! memory exits with the worker instead of growing the menu-bar app's resident set.
+//! Users can still opt into an in-process cached model for lower first-token latency.
+//! Everything runs on-device; there is no network path.
 
 use crate::error::{Result, SpielError};
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -28,7 +31,8 @@ impl Transcriber {
             .to_str()
             .ok_or_else(|| SpielError::Model("model path is not valid UTF-8".into()))?;
 
-        let ctx = WhisperContext::new_with_params(path_str, WhisperContextParameters::default())
+        let ctx_params = low_memory_context_params();
+        let ctx = WhisperContext::new_with_params(path_str, ctx_params)
             .map_err(|e| SpielError::Model(format!("failed to load model: {e}")))?;
 
         Ok(Self {
@@ -51,6 +55,10 @@ impl Transcriber {
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(choose_thread_count(configured_threads));
+        params.set_no_timestamps(true);
+        params.set_single_segment(true);
+        params.set_audio_ctx(audio_context_for_samples(samples.len()));
+        params.set_n_max_text_ctx(0);
         params.set_translate(false);
         params.set_no_context(true);
         params.set_suppress_blank(true);
@@ -84,6 +92,125 @@ impl Transcriber {
 
         Ok(clean_output(&text))
     }
+}
+
+pub fn transcribe_in_worker(
+    model_path: &Path,
+    model_id: &str,
+    samples: &[f32],
+    language: &str,
+    configured_threads: u8,
+) -> Result<String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| SpielError::Transcription(format!("cannot locate Spiel executable: {e}")))?;
+    let model_path = model_path
+        .to_str()
+        .ok_or_else(|| SpielError::Model("model path is not valid UTF-8".into()))?;
+
+    let mut child = Command::new(exe)
+        .arg("--spiel-transcribe-worker")
+        .arg(model_path)
+        .arg(model_id)
+        .arg(language)
+        .arg(configured_threads.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            SpielError::Transcription(format!("failed to start transcription worker: {e}"))
+        })?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| SpielError::Transcription("worker stdin unavailable".into()))?;
+        for sample in samples {
+            stdin.write_all(&sample.to_le_bytes()).map_err(|e| {
+                SpielError::Transcription(format!("failed to send audio to worker: {e}"))
+            })?;
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| SpielError::Transcription(format!("transcription worker failed: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(SpielError::Transcription(if stderr.is_empty() {
+            format!("transcription worker exited with {}", output.status)
+        } else {
+            stderr
+        }));
+    }
+
+    String::from_utf8(output.stdout)
+        .map(|text| text.trim_end_matches('\n').to_string())
+        .map_err(|e| SpielError::Transcription(format!("worker returned invalid UTF-8: {e}")))
+}
+
+pub fn run_worker_from_args(args: &[String]) -> bool {
+    if args.get(1).map(String::as_str) != Some("--spiel-transcribe-worker") {
+        return false;
+    }
+
+    let result = run_worker(args);
+    match result {
+        Ok(text) => {
+            println!("{text}");
+            true
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn run_worker(args: &[String]) -> Result<String> {
+    let model_path = args
+        .get(2)
+        .ok_or_else(|| SpielError::Transcription("worker missing model path".into()))?;
+    let model_id = args
+        .get(3)
+        .ok_or_else(|| SpielError::Transcription("worker missing model id".into()))?;
+    let language = args
+        .get(4)
+        .ok_or_else(|| SpielError::Transcription("worker missing language".into()))?;
+    let threads = args
+        .get(5)
+        .and_then(|raw| raw.parse::<u8>().ok())
+        .unwrap_or(1);
+
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut bytes)
+        .map_err(|e| SpielError::Transcription(format!("failed to read worker audio: {e}")))?;
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return Err(SpielError::Transcription(
+            "worker received partial f32 audio frame".into(),
+        ));
+    }
+    let samples = bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect::<Vec<_>>();
+
+    let transcriber = Transcriber::load(Path::new(model_path), model_id)?;
+    transcriber.transcribe(&samples, language, threads)
+}
+
+fn low_memory_context_params() -> WhisperContextParameters<'static> {
+    let mut params = WhisperContextParameters::default();
+    params.use_gpu(false);
+    params.flash_attn(true);
+    params
+}
+
+fn audio_context_for_samples(sample_count: usize) -> i32 {
+    let seconds = (sample_count as f32 / 16_000.0).ceil() as i32;
+    (seconds * 50).clamp(150, 1500)
 }
 
 /// Tidy Whisper output: drop leading/trailing whitespace and the bracketed non-speech
@@ -178,5 +305,12 @@ mod tests {
     fn thread_count_is_bounded() {
         let n = choose_thread_count(2);
         assert!((1..=8).contains(&n));
+    }
+
+    #[test]
+    fn audio_context_is_bounded_for_dictation_length() {
+        assert_eq!(audio_context_for_samples(16_000), 150);
+        assert_eq!(audio_context_for_samples(16_000 * 120), 1500);
+        assert_eq!(audio_context_for_samples(16_000 * 600), 1500);
     }
 }
