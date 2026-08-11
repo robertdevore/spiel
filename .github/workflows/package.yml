@@ -62,14 +62,17 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
-          cxx="$(xcrun --find clang++)"
+          sdk_path="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+          cxx="/usr/bin/clang++"
+          cxx_include="$sdk_path/usr/include/c++/v1"
+          test -f "$cxx_include/array"
           echo "SDKROOT=$sdk_path" >> "$GITHUB_ENV"
-          echo "CC=$(xcrun --find clang)" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
+          echo "CC=/usr/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=$cxx" >> "$GITHUB_ENV"
-          echo "CXXFLAGS=-I$sdk_path/usr/include/c++/v1 -U_XOPEN_SOURCE -include cstdint -include cstdio" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=-I$cxx_include" >> "$GITHUB_ENV"
           printf '#include <array>\n#include <stdint.h>\n#include <stdio.h>\nint main() { int64_t value = 0; FILE *file = nullptr; std::array<int, 1> item{}; return value + (file != nullptr) + item[0]; }\n' |
-            "$cxx" -D_DARWIN_C_SOURCE -D_XOPEN_SOURCE=600 -U_XOPEN_SOURCE -I"$sdk_path/usr/include/c++/v1" -isysroot "$sdk_path" -std=c++17 -x c++ -fsyntax-only -
+            "$cxx" -D_DARWIN_C_SOURCE -D_XOPEN_SOURCE=600 -I"$cxx_include" -isysroot "$sdk_path" -std=c++17 -x c++ -fsyntax-only -
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
