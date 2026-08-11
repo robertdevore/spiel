@@ -22,10 +22,10 @@ https://github.com/robertdevore/spiel/releases
 
 Choose the file for your computer:
 
-- Intel Mac: `Spiel_1.0.0_macOS_x64.dmg`
-- Apple Silicon Mac: `Spiel_1.0.0_macOS_arm64.dmg`
-- Windows: `Spiel_1.0.0_x64-setup.exe` or `Spiel_1.0.0_x64_en-US.msi`
-- Linux: `Spiel_1.0.0_amd64.AppImage` or `Spiel_1.0.0_amd64.deb`
+- Intel Mac: `Spiel_1.0.1_macOS_x64.dmg`
+- Apple Silicon Mac: `Spiel_1.0.1_macOS_arm64.dmg`
+- Windows: `Spiel_1.0.1_x64-setup.exe` or `Spiel_1.0.1_x64_en-US.msi`
+- Linux: `Spiel_1.0.1_amd64.AppImage` or `Spiel_1.0.1_amd64.deb`
 
 ### macOS Security Note
 
@@ -191,6 +191,8 @@ Delete the model from Spiel and download it again. If you use sidecar checksums,
 - `src-tauri/src/`: Rust backend for capture, transcription, insertion, model management, settings, and IPC commands.
 - `scripts/`: packaging helpers.
 - `.github/workflows/package.yml`: release packaging workflow.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
