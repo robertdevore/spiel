@@ -62,7 +62,7 @@ impl Transcriber {
         params.set_translate(false);
         params.set_no_context(true);
         params.set_suppress_blank(true);
-        params.set_suppress_non_speech_tokens(true);
+        params.set_suppress_nst(true);
         params.set_temperature(0.0);
         params.set_temperature_inc(0.0);
         if language != "auto" && !language.is_empty() {
@@ -78,16 +78,17 @@ impl Transcriber {
             .full(params, samples)
             .map_err(|e| SpielError::Transcription(e.to_string()))?;
 
-        let num_segments = state
-            .full_n_segments()
-            .map_err(|e| SpielError::Transcription(e.to_string()))?;
+        let num_segments = state.full_n_segments();
 
         let mut text = String::new();
         for i in 0..num_segments {
-            let seg = state
-                .full_get_segment_text(i)
+            let segment = state
+                .get_segment(i)
+                .ok_or_else(|| SpielError::Transcription(format!("missing Whisper segment {i}")))?;
+            let seg = segment
+                .to_str()
                 .map_err(|e| SpielError::Transcription(e.to_string()))?;
-            text.push_str(&seg);
+            text.push_str(seg);
         }
 
         Ok(clean_output(&text))

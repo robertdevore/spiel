@@ -6,6 +6,7 @@
 - Preserved checksum sidecars for installed speech models.
 - Updated vulnerable frontend build dependencies.
 - Stopped rebuilding the full interface ten times per second while recording.
+- Updated the embedded Whisper runtime for current Apple Silicon toolchains.
 
 ## 1.0.0 - 2026-07-06
 

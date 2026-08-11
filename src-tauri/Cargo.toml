@@ -34,7 +34,7 @@ thiserror = "1"
 cpal = "0.15"
 
 # Local transcription (embedded whisper.cpp via cmake — no network, no CLI)
-whisper-rs = "0.12"
+whisper-rs = "0.16"
 
 # Clipboard
 arboard = "3"
