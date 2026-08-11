@@ -174,6 +174,7 @@ let refreshRequested = false;
 let renderQueued = false;
 let recordingAnchorMs: number | null = null;
 let recordingBaseElapsedMs = 0;
+let recordingStatusText: HTMLElement | null = null;
 const downloads: Record<string, { downloaded: number; total: number | null }> = {};
 
 const app = document.getElementById("app")!;
@@ -352,6 +353,7 @@ function render() {
   const s = status;
   const c = config;
 
+  recordingStatusText = null;
   app.innerHTML = "";
   app.appendChild(headerEl());
   if (lastError) app.appendChild(errorBanner(lastError));
@@ -412,6 +414,7 @@ function statusCard(s: StatusSnapshot, c: Config): HTMLElement {
   const statusText = document.createElement("span");
   statusText.className = "status-text";
   statusText.textContent = `${PHASE_LABEL[s.phase]}${elapsed}`;
+  recordingStatusText = recording ? statusText : null;
   row.appendChild(dot);
   row.appendChild(statusText);
   card.appendChild(row);
@@ -1057,10 +1060,13 @@ async function init() {
     refreshAll();
   });
 
-  // Keep the on-screen elapsed timer smooth without polling backend status.
+  // Update only the elapsed label. Rebuilding the complete settings/model DOM
+  // ten times per second consumed unnecessary CPU while recording.
   setInterval(() => {
-    if (status?.phase === "recording") queueRender();
-  }, 100);
+    if (status?.phase === "recording" && recordingStatusText) {
+      recordingStatusText.textContent = `${PHASE_LABEL.recording} ${(currentElapsedMs(status) / 1000).toFixed(1)}s`;
+    }
+  }, 250);
 
   await refreshAll();
 }
