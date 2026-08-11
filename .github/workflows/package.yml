@@ -18,7 +18,8 @@ jobs:
       matrix:
         include:
           - name: macOS Apple Silicon app and DMG
-            os: macos-15
+            os: macos-14
+            xcode: "16.2"
             command: npm run package:mac
             artifact: Spiel-macOS-arm64
             paths: |
@@ -26,6 +27,7 @@ jobs:
               release/artifacts/*_macOS_*.app.zip
           - name: macOS Intel app and DMG
             os: macos-15-intel
+            xcode: "16.4"
             command: npm run package:mac
             artifact: Spiel-macOS-x64
             paths: |
@@ -54,7 +56,7 @@ jobs:
         if: runner.os == 'macOS'
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: "16.4"
+          xcode-version: ${{ matrix.xcode }}
 
       - name: Configure macOS SDK
         if: runner.os == 'macOS'
