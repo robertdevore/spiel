@@ -67,9 +67,9 @@ jobs:
           echo "SDKROOT=$sdk_path" >> "$GITHUB_ENV"
           echo "CC=$(xcrun --find clang)" >> "$GITHUB_ENV"
           echo "CXX=$cxx" >> "$GITHUB_ENV"
-          echo "CXXFLAGS=-I$sdk_path/usr/include/c++/v1" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=-I$sdk_path/usr/include/c++/v1 -U_XOPEN_SOURCE -include cstdint -include cstdio" >> "$GITHUB_ENV"
           printf '#include <array>\n#include <stdint.h>\n#include <stdio.h>\nint main() { int64_t value = 0; FILE *file = nullptr; std::array<int, 1> item{}; return value + (file != nullptr) + item[0]; }\n' |
-            "$cxx" -I"$sdk_path/usr/include/c++/v1" -isysroot "$sdk_path" -std=c++17 -x c++ -fsyntax-only -
+            "$cxx" -D_DARWIN_C_SOURCE -D_XOPEN_SOURCE=600 -U_XOPEN_SOURCE -I"$sdk_path/usr/include/c++/v1" -isysroot "$sdk_path" -std=c++17 -x c++ -fsyntax-only -
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
