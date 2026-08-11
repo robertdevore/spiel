@@ -59,7 +59,10 @@ jobs:
       - name: Configure macOS SDK
         if: runner.os == 'macOS'
         shell: bash
-        run: echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+        run: |
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          echo "CC=$(xcrun --find clang)" >> "$GITHUB_ENV"
+          echo "CXX=$(xcrun --find clang++)" >> "$GITHUB_ENV"
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
