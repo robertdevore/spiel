@@ -56,6 +56,11 @@ jobs:
         with:
           xcode-version: "16.4"
 
+      - name: Configure macOS SDK
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
