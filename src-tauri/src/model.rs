@@ -9,7 +9,7 @@
 //! (when known) a pinned SHA-256. A truncated or corrupted download therefore never
 //! gets loaded as a model.
 
-use crate::error::{Result, SpielError};
+use crate::error::{DownloadFailureKind, Result, SpielError};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
@@ -162,6 +162,32 @@ pub const REGISTRY: &[ModelSpec] = &[
 
 const DEFAULT_PART_CLEANUP_MS: u64 = 24 * 60 * 60 * 1000;
 
+struct ModelFiles {
+    model: std::path::PathBuf,
+    partial: std::path::PathBuf,
+    checksum: std::path::PathBuf,
+}
+
+impl ModelFiles {
+    fn new(model_dir: &Path, spec: &ModelSpec) -> Self {
+        let model = model_dir.join(spec.filename);
+        Self {
+            partial: model_dir.join(format!("{}.part", spec.filename)),
+            checksum: checksum_sidecar_path(&model),
+            model,
+        }
+    }
+}
+
+pub fn delete_files(model_dir: &Path, spec: &ModelSpec) -> Result<()> {
+    let files = ModelFiles::new(model_dir, spec);
+    std::fs::remove_file(&files.model)
+        .map_err(|e| SpielError::Other(format!("Failed to remove '{}': {e}", spec.id)))?;
+    let _ = std::fs::remove_file(&files.checksum);
+    let _ = std::fs::remove_file(&files.partial);
+    Ok(())
+}
+
 pub fn spec(id: &str) -> Option<&'static ModelSpec> {
     REGISTRY.iter().find(|m| m.id == id)
 }
@@ -256,8 +282,9 @@ pub fn inspect_install(model_dir: &Path, id: &str) -> InstallInfo {
         };
     };
 
-    let path = model_dir.join(spec.filename);
-    let part_path = model_dir.join(format!("{}.part", spec.filename));
+    let files = ModelFiles::new(model_dir, spec);
+    let path = files.model;
+    let part_path = files.partial;
 
     if let Err(err) = is_safe_model_path(&path, "model") {
         return InstallInfo {
@@ -427,8 +454,9 @@ pub fn download(
         load_download_timeout_ms("SPIEL_DOWNLOAD_TIMEOUT_MS", 30 * 60 * 1_000),
     );
 
-    let final_path = model_dir.join(spec.filename);
-    let part_path = model_dir.join(format!("{}.part", spec.filename));
+    let files = ModelFiles::new(model_dir, spec);
+    let final_path = files.model;
+    let part_path = files.partial;
 
     is_safe_model_path(&part_path, "temporary model file")
         .and_then(|_| is_safe_model_path(&final_path, "target model file"))?;
@@ -481,17 +509,18 @@ fn download_once(
     on_progress: &mut impl FnMut(u64, Option<u64>),
     should_cancel: &impl Fn() -> bool,
 ) -> Result<DownloadSummary> {
-    let mut resp = client
-        .get(spec.url)
-        .send()
-        .map_err(|e| SpielError::Download(format!("could not reach {}: {e}", spec.url)))?;
+    let mut resp = client.get(spec.url).send().map_err(|e| {
+        download_failure(
+            DownloadFailureKind::Network,
+            format!("could not reach {}: {e}", spec.url),
+        )
+    })?;
 
     if !resp.status().is_success() {
-        return Err(SpielError::Download(format!(
-            "server returned {} for {}",
-            resp.status(),
-            spec.url
-        )));
+        return Err(download_failure(
+            DownloadFailureKind::HttpStatus,
+            format!("server returned {} for {}", resp.status(), spec.url),
+        ));
     }
 
     let total = resp.content_length();
@@ -505,7 +534,7 @@ fn download_once(
         if should_cancel() {
             drop(file);
             let _ = std::fs::remove_file(part_path);
-            return Err(SpielError::Download("canceled".into()));
+            return Err(download_failure(DownloadFailureKind::Canceled, "canceled"));
         }
         let n = resp
             .read(&mut buf)
@@ -600,7 +629,7 @@ fn validate_model_file_with_open_handle(
         }
         let got = hex(&hasher.finalize());
         if !got.eq_ignore_ascii_case(&expected) {
-            return Err(SpielError::Model(format!(
+            return Err(SpielError::ModelChecksum(format!(
                 "{path:?} checksum mismatch: expected {} but got {}",
                 expected, got
             )));
@@ -622,7 +651,7 @@ fn expected_checksum(
         return Ok(Some(spec.sha256.to_lowercase()));
     }
 
-    let sidecar = sidecar_path(path);
+    let sidecar = checksum_sidecar_path(path);
     if !sidecar.exists() {
         return Ok(None);
     }
@@ -647,13 +676,9 @@ fn expected_checksum(
     Ok(Some(token.to_lowercase()))
 }
 
-fn sidecar_path(model_path: &Path) -> std::path::PathBuf {
+pub fn checksum_sidecar_path(model_path: &Path) -> std::path::PathBuf {
     let file_name = model_path.file_name().unwrap_or_default();
     model_path.with_file_name(format!("{}.sha256", file_name.to_string_lossy()))
-}
-
-pub fn checksum_sidecar_path(model_path: &Path) -> std::path::PathBuf {
-    sidecar_path(model_path)
 }
 
 fn sidecar_target_path(sidecar_path: &Path) -> Option<std::path::PathBuf> {
@@ -692,8 +717,12 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn open_part_file(path: &Path) -> Result<std::fs::File> {
-    is_safe_model_path(path, "temporary model file")
-        .map_err(|e| SpielError::Download(format!("unsafe temporary model file {path:?}: {e}")))?;
+    is_safe_model_path(path, "temporary model file").map_err(|e| {
+        download_failure(
+            DownloadFailureKind::UnsafePath,
+            format!("unsafe temporary model file {path:?}: {e}"),
+        )
+    })?;
 
     let mut attempts = 0;
     loop {
@@ -715,9 +744,10 @@ fn open_part_file(path: &Path) -> Result<std::fs::File> {
 fn ensure_complete_download(total: Option<u64>, downloaded: u64) -> Result<()> {
     if let Some(expected) = total {
         if downloaded != expected {
-            return Err(SpielError::Download(format!(
-                "download incomplete: expected {expected} bytes, got {downloaded}"
-            )));
+            return Err(download_failure(
+                DownloadFailureKind::Incomplete,
+                format!("download incomplete: expected {expected} bytes, got {downloaded}"),
+            ));
         }
     }
     Ok(())
@@ -787,19 +817,27 @@ fn retry_delay_ms(base_ms: u64, attempt: u32) -> u64 {
     bounded.saturating_add(jitter / 2)
 }
 
+fn download_failure(kind: DownloadFailureKind, message: impl Into<String>) -> SpielError {
+    SpielError::DownloadFailure {
+        kind,
+        message: message.into(),
+    }
+}
+
 fn is_download_cancelled(err: &SpielError) -> bool {
-    matches!(err, SpielError::Download(reason) if reason == "canceled")
+    matches!(
+        err,
+        SpielError::DownloadFailure {
+            kind: DownloadFailureKind::Canceled,
+            ..
+        }
+    )
 }
 
 pub fn classify_download_error(err: &SpielError) -> &'static str {
     match err {
-        SpielError::Download(reason) if reason == "canceled" => "canceled",
-        SpielError::Download(reason) if reason.contains("checksum mismatch") => "checksum",
-        SpielError::Download(reason) if reason.contains("server returned") => "http_status",
-        SpielError::Download(reason) if reason.contains("could not reach") => "network",
-        SpielError::Download(reason) if reason.contains("download incomplete") => "incomplete",
-        SpielError::Download(reason) if reason.contains("unsafe") => "unsafe_path",
-        SpielError::Model(reason) if reason.contains("checksum mismatch") => "checksum",
+        SpielError::DownloadFailure { kind, .. } => kind.as_str(),
+        SpielError::ModelChecksum(_) => DownloadFailureKind::Checksum.as_str(),
         SpielError::Model(_) => "validation",
         _ => "unknown",
     }
@@ -1226,17 +1264,83 @@ mod tests {
     }
 
     #[test]
+    fn artifact_deletion_removes_companions_and_preserves_other_models() {
+        let dir = std::env::temp_dir().join(format!(
+            "spiel-delete-model-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let selected = spec("base.en").unwrap();
+        for name in [
+            "ggml-base.en.bin",
+            "ggml-base.en.bin.part",
+            "ggml-base.en.bin.sha256",
+            "ggml-tiny.en.bin",
+        ] {
+            std::fs::write(dir.join(name), b"fixture").unwrap();
+        }
+        delete_files(&dir, selected).unwrap();
+        assert!(!dir.join("ggml-base.en.bin").exists());
+        assert!(!dir.join("ggml-base.en.bin.part").exists());
+        assert!(!dir.join("ggml-base.en.bin.sha256").exists());
+        assert!(dir.join("ggml-tiny.en.bin").exists());
+        std::fs::write(
+            dir.join("ggml-base.en.bin.part"),
+            b"keep on primary failure",
+        )
+        .unwrap();
+        assert!(delete_files(&dir, selected).is_err());
+        assert!(dir.join("ggml-base.en.bin.part").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn download_categories_and_cancellation_do_not_depend_on_prose() {
+        for (kind, label) in [
+            (DownloadFailureKind::Canceled, "canceled"),
+            (DownloadFailureKind::Checksum, "checksum"),
+            (DownloadFailureKind::HttpStatus, "http_status"),
+            (DownloadFailureKind::Network, "network"),
+            (DownloadFailureKind::Incomplete, "incomplete"),
+            (DownloadFailureKind::UnsafePath, "unsafe_path"),
+        ] {
+            let err = download_failure(kind, "arbitrary user-facing explanation");
+            assert_eq!(classify_download_error(&err), label);
+            assert_eq!(
+                is_download_cancelled(&err),
+                kind == DownloadFailureKind::Canceled
+            );
+            assert_eq!(
+                err.to_string(),
+                "Download failed: arbitrary user-facing explanation"
+            );
+        }
+        let untyped = SpielError::Download("canceled".into());
+        assert!(!is_download_cancelled(&untyped));
+        assert_eq!(classify_download_error(&untyped), "unknown");
+        let checksum = SpielError::ModelChecksum("different checksum wording".into());
+        assert_eq!(classify_download_error(&checksum), "checksum");
+    }
+
+    #[test]
     fn classifies_download_error_variants() {
         assert_eq!(
-            classify_download_error(&SpielError::Download("canceled".into())),
+            classify_download_error(&download_failure(DownloadFailureKind::Canceled, "canceled")),
             "canceled"
         );
         assert_eq!(
-            classify_download_error(&SpielError::Download("could not reach host".into())),
+            classify_download_error(&download_failure(
+                DownloadFailureKind::Network,
+                "could not reach host"
+            )),
             "network"
         );
         assert_eq!(
-            classify_download_error(&SpielError::Model("checksum mismatch".into())),
+            classify_download_error(&SpielError::ModelChecksum("checksum mismatch".into())),
             "checksum"
         );
     }

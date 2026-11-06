@@ -8,6 +8,29 @@
 
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadFailureKind {
+    Canceled,
+    Checksum,
+    HttpStatus,
+    Network,
+    Incomplete,
+    UnsafePath,
+}
+
+impl DownloadFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Canceled => "canceled",
+            Self::Checksum => "checksum",
+            Self::HttpStatus => "http_status",
+            Self::Network => "network",
+            Self::Incomplete => "incomplete",
+            Self::UnsafePath => "unsafe_path",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SpielError {
     #[error("No microphone found. Connect an input device and try again.")]
@@ -31,6 +54,15 @@ pub enum SpielError {
     #[error("Download failed: {0}")]
     Download(String),
 
+    #[error("Download failed: {message}")]
+    DownloadFailure {
+        kind: DownloadFailureKind,
+        message: String,
+    },
+
+    #[error("Speech model error: {0}")]
+    ModelChecksum(String),
+
     #[error("Settings error: {0}")]
     Config(String),
 
@@ -38,27 +70,9 @@ pub enum SpielError {
     Other(String),
 }
 
-impl SpielError {
-    /// A stable machine code the frontend can branch on without parsing prose.
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::NoInputDevice => "no_input_device",
-            Self::Audio(_) => "audio",
-            Self::ModelMissing => "model_missing",
-            Self::Model(_) => "model",
-            Self::Transcription(_) => "transcription",
-            Self::Insertion(_) => "insertion",
-            Self::Download(_) => "download",
-            Self::Config(_) => "config",
-            Self::Other(_) => "other",
-        }
-    }
-}
-
 pub type Result<T> = std::result::Result<T, SpielError>;
 
-/// Command-layer helper: collapse a typed error into the `(code, message)` the UI shows.
+/// Convert an internal typed error to the string returned by Tauri commands.
 pub fn to_command_error(e: SpielError) -> String {
-    // We keep the human message; the code travels in a separate status field where needed.
     e.to_string()
 }
