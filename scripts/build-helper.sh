@@ -4,10 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-CLT_CXX_INCLUDE="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
-if [[ -d "$CLT_CXX_INCLUDE" && -z "${CPLUS_INCLUDE_PATH:-}" ]]; then
-  export CPLUS_INCLUDE_PATH="$CLT_CXX_INCLUDE"
-fi
+source scripts/build-env.sh
 
 TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 HELPER_DIR="src-tauri/binaries"
