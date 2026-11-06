@@ -56,23 +56,17 @@ pub fn restore_before_paste(target: Option<FocusTarget>) {
         return;
     };
     if activate(target) {
-        std::thread::sleep(std::time::Duration::from_millis(env_delay_ms(
-            "SPIEL_FOCUS_RESTORE_DELAY_MS",
-            DEFAULT_FOCUS_RESTORE_DELAY_MS,
-        )));
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::runtime_options::paste_delay_ms(
+                "SPIEL_FOCUS_RESTORE_DELAY_MS",
+                DEFAULT_FOCUS_RESTORE_DELAY_MS,
+            ),
+        ));
     }
 }
 
 fn should_remember(target: FocusTarget, own_pid: i32) -> bool {
     target.pid > 0 && target.pid != own_pid && !is_system_ui(target)
-}
-
-fn env_delay_ms(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|v| v.clamp(0, 2_000))
-        .unwrap_or(default)
 }
 
 #[cfg(target_os = "macos")]

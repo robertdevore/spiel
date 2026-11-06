@@ -8,28 +8,34 @@ mod accessibility;
 mod audio;
 mod commands;
 mod config;
+mod diagnostics;
 mod dictation;
+mod downloads;
 mod error;
 mod focus;
+mod hotkey;
 mod insert;
 mod memory;
 mod model;
+mod perf;
+mod runtime_options;
+mod settings_window;
 mod state;
+mod transcription;
 mod whisper;
 
 pub fn run_transcription_worker_from_args(args: &[String]) -> bool {
     whisper::run_worker_from_args(args)
 }
 
+use crate::runtime_options::env_flag;
 use config::{Config, Paths};
 use state::AppState;
 use std::path::Component;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -81,8 +87,8 @@ pub fn run() {
             build_tray(&handle)?;
             // If a saved hotkey is invalid/taken, fall back to the default rather than
             // failing startup — the app must still come up so the user can fix it.
-            if register_hotkey(&handle, &hotkey).is_err() {
-                let _ = register_hotkey(&handle, &Config::default().hotkey);
+            if hotkey::register(&handle, &hotkey).is_err() {
+                let _ = hotkey::register(&handle, &Config::default().hotkey);
             }
 
             dictation::emit_status(&handle);
@@ -138,29 +144,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "toggle" => dictation::toggle(app),
-            "settings" => dictation::show_settings_window(app),
+            "settings" => settings_window::show(app),
             "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
     Ok(())
-}
-
-/// (Re)register the global toggle hotkey. Replaces any previously registered shortcut.
-pub fn register_hotkey(app: &tauri::AppHandle, spec: &str) -> error::Result<()> {
-    let shortcut = parse_shortcut(spec)?;
-    let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
-    gs.on_shortcut(shortcut, move |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            dictation::toggle(app);
-        }
-    })
-    .map_err(|e| {
-        error::SpielError::Config(format!(
-            "Could not register hotkey '{spec}': {e}. It may already be in use by another app."
-        ))
-    })
 }
 
 fn resolve_model_dir(model_dir: PathBuf, fallback_root: &Path) -> Result<PathBuf, String> {
@@ -209,9 +198,8 @@ fn emit_startup_health(app: tauri::AppHandle, cleanup_report: model::CleanupRepo
         .name("spiel-startup-health".into())
         .stack_size(64 * 1024)
         .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(350));
             if let Some(state) = app.try_state::<AppState>() {
-                let snapshot = commands::build_startup_health(&state, cleanup_report);
+                let snapshot = diagnostics::build_startup_health(&state, cleanup_report);
                 let _ = app.emit("startup-health", snapshot);
             }
         });
@@ -232,13 +220,16 @@ fn start_model_store_maintenance(app: tauri::AppHandle, older_than: std::time::D
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(interval_ms));
             if let Some(state) = app.try_state::<AppState>() {
-                let report =
-                    model::cleanup_stale_model_artifacts(&state.paths.model_dir, older_than);
+                let Some(report) = state.download.when_idle(|| {
+                    model::cleanup_stale_model_artifacts(&state.paths.model_dir, older_than)
+                }) else {
+                    continue;
+                };
                 if report.removed_partial_files > 0 || report.removed_sidecar_files > 0 {
                     state.clear_model_install_cache();
                     let _ = app.emit(
                         "startup-health",
-                        commands::build_startup_health(&state, report),
+                        diagnostics::build_startup_health(&state, report),
                     );
                 }
             }
@@ -258,33 +249,9 @@ fn start_optional_model_warmup(app: tauri::AppHandle) {
         .name("spiel-model-warmup".into())
         .stack_size(64 * 1024)
         .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(500));
             let Some(state) = app.try_state::<AppState>() else {
                 return;
             };
-            let _ = dictation::warm_up_current_model(&state, config.keep_model_loaded);
+            let _ = state.transcription.warm_up(&state.paths, &config);
         });
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
-}
-
-/// Validate a hotkey string without registering it. Used to reject bad input early.
-pub fn validate_hotkey(spec: &str) -> error::Result<()> {
-    parse_shortcut(spec).map(|_| ())
-}
-
-/// Parse a hotkey string (e.g. "Cmd+Alt+D"). Returns a clear error for invalid input.
-fn parse_shortcut(spec: &str) -> error::Result<Shortcut> {
-    Shortcut::from_str(spec.trim()).map_err(|_| {
-        error::SpielError::Config(format!(
-            "'{spec}' isn't a valid hotkey. Use one or more modifiers plus a key — for \
-             example Cmd+Alt+D, Cmd+Shift+Space, or CmdOrCtrl+Shift+K. Letters and named \
-             keys work; punctuation like '?' does not."
-        ))
-    })
 }

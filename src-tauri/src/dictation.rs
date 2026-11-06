@@ -3,13 +3,12 @@
 //! single code path, so behavior can't drift between entry points (a core flaw of the
 //! previous build, where the hotkey and the commands did different things).
 
-use crate::error::SpielError;
+use crate::settings_window::show as show_settings_window;
 use crate::state::{AppState, PerfSample, Phase};
-use crate::whisper::{self, Transcriber};
-use crate::{audio, focus, insert, model};
+use crate::{audio, focus, insert};
 use serde::Serialize;
 use std::time::Instant;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Serialize)]
 struct TranscriptEvent {
@@ -154,23 +153,12 @@ fn process_capture(
         return;
     }
 
-    let (language, threads, keep_model_loaded) = {
-        let c = state.config.lock().unwrap();
-        (
-            c.language.clone(),
-            c.transcription_threads,
-            c.keep_model_loaded,
-        )
-    };
-
+    let config = state.config.lock().unwrap().clone();
     let transcribe_started_at = Instant::now();
-    let text = match transcribe_capture(
-        &state,
-        &capture.samples,
-        &language,
-        threads,
-        keep_model_loaded,
-    ) {
+    let text = match state
+        .transcription
+        .transcribe(&state.paths, &config, &capture.samples)
+    {
         Ok(t) => t,
         Err(e) => {
             state.record_perf_sample(PerfSample {
@@ -275,80 +263,4 @@ fn process_capture(
         );
         emit_status(&app);
     });
-}
-
-fn transcribe_capture(
-    state: &AppState,
-    samples: &[f32],
-    language: &str,
-    threads: u8,
-    keep_model_loaded: bool,
-) -> crate::error::Result<String> {
-    let model_id = state.config.lock().unwrap().model.clone();
-    let spec = model::spec(&model_id).ok_or(SpielError::ModelMissing)?;
-    let path = state.paths.model_path(spec.filename);
-
-    if keep_model_loaded {
-        return ensure_transcriber(state)?.transcribe(samples, language, threads);
-    }
-
-    clear_model_cache(state);
-    whisper::transcribe_in_worker(&path, &model_id, samples, language, threads)
-}
-
-/// Return the cached model context, loading (and caching) it if absent or stale.
-fn ensure_transcriber(state: &AppState) -> crate::error::Result<Transcriber> {
-    let model_id = state.config.lock().unwrap().model.clone();
-    let spec = model::spec(&model_id).ok_or(SpielError::ModelMissing)?;
-    let path = state.paths.model_path(spec.filename);
-
-    let mut guard = state.transcriber.lock().unwrap();
-    if let Some(t) = guard.as_ref() {
-        if t.model_id == model_id {
-            return Ok(t.clone());
-        }
-    }
-    let loaded = Transcriber::load(&path, &model_id)?;
-    *guard = Some(loaded.clone());
-    Ok(loaded)
-}
-
-/// Invalidate the cached model (call after the model setting changes).
-pub fn clear_model_cache(state: &AppState) {
-    *state.transcriber.lock().unwrap() = None;
-}
-
-pub fn warm_up_current_model(state: &AppState, keep_loaded: bool) -> crate::error::Result<()> {
-    let _ = ensure_transcriber(state)?;
-    if !keep_loaded {
-        clear_model_cache(state);
-    }
-    Ok(())
-}
-
-pub fn show_settings_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
-        let _ = win.center();
-        return;
-    }
-
-    match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("Spiel")
-        .inner_size(420.0, 600.0)
-        .min_inner_size(380.0, 480.0)
-        .resizable(true)
-        .fullscreen(false)
-        .center()
-        .visible(true)
-        .build()
-    {
-        Ok(win) => {
-            let _ = win.set_focus();
-        }
-        Err(error) => {
-            eprintln!("[spiel] failed to open settings window: {error}");
-        }
-    }
 }

@@ -70,10 +70,12 @@ pub fn insert(
 
     // Let the pasteboard write settle before we trigger the paste, so the focused app
     // can't read a stale changeCount.
-    std::thread::sleep(std::time::Duration::from_millis(env_delay_ms(
-        "SPIEL_PRE_PASTE_DELAY_MS",
-        DEFAULT_PRE_PASTE_DELAY_MS,
-    )));
+    std::thread::sleep(std::time::Duration::from_millis(
+        crate::runtime_options::paste_delay_ms(
+            "SPIEL_PRE_PASTE_DELAY_MS",
+            DEFAULT_PRE_PASTE_DELAY_MS,
+        ),
+    ));
     paste_via_cmd_v()?;
     outcome.pasted = true;
 
@@ -83,10 +85,12 @@ pub fn insert(
             // put the old clipboard back. Too short a wait and the app reads the restored
             // (previous) contents instead of the transcript — which looks like Spiel
             // "pasting your clipboard".
-            std::thread::sleep(std::time::Duration::from_millis(env_delay_ms(
-                "SPIEL_RESTORE_DELAY_MS",
-                DEFAULT_RESTORE_DELAY_MS,
-            )));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::runtime_options::paste_delay_ms(
+                    "SPIEL_RESTORE_DELAY_MS",
+                    DEFAULT_RESTORE_DELAY_MS,
+                ),
+            ));
             if clipboard.set_text(prev).is_ok() {
                 outcome.restored_previous = true;
             }
@@ -94,14 +98,6 @@ pub fn insert(
     }
 
     Ok(outcome)
-}
-
-fn env_delay_ms(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|v| v.clamp(0, 2_000))
-        .unwrap_or(default)
 }
 
 /// Synthesize Cmd+V by posting the V keycode with the Command modifier flag set.
