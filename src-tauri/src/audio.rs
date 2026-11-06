@@ -74,10 +74,60 @@ impl Recorder {
     }
 }
 
-#[derive(Default)]
 struct DownsampleState {
+    ratio: f64,
     frame_position: u64,
     next_output_frame: f64,
+}
+
+struct SampleAccumulator {
+    samples: Vec<f32>,
+    max_samples: usize,
+    channels: usize,
+    downsample: Option<DownsampleState>,
+}
+
+impl SampleAccumulator {
+    fn new(input_rate: u32, channels: u16, max_samples: usize) -> Self {
+        Self {
+            samples: Vec::with_capacity(max_samples),
+            max_samples,
+            channels: usize::from(channels.max(1)),
+            downsample: (input_rate > TARGET_SAMPLE_RATE).then_some(DownsampleState {
+                ratio: input_rate as f64 / TARGET_SAMPLE_RATE as f64,
+                frame_position: 0,
+                next_output_frame: 0.0,
+            }),
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.samples.len() >= self.max_samples
+    }
+
+    fn append<T: Copy>(&mut self, data: &[T], to_f32: impl Fn(T) -> f32) {
+        // Ignore partial frames; CPAL delivers interleaved channel frames.
+        for frame in data.chunks_exact(self.channels) {
+            if self.is_full() {
+                break;
+            }
+            let keep = match self.downsample.as_mut() {
+                Some(state) => {
+                    let keep = state.frame_position as f64 >= state.next_output_frame;
+                    if keep {
+                        state.next_output_frame += state.ratio;
+                    }
+                    state.frame_position = state.frame_position.saturating_add(1);
+                    keep
+                }
+                None => true,
+            };
+            if keep {
+                let sum: f32 = frame.iter().map(|&sample| to_f32(sample)).sum();
+                self.samples.push(sum / self.channels as f32);
+            }
+        }
+    }
 }
 
 /// Begin capturing from the default input device.
@@ -102,25 +152,15 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
     let elapsed_clone = Arc::clone(&elapsed_ms);
 
     // Time-bound capture by input sample rate for real-time behavior.
-    // Output is still trimmed to the same wall-clock duration after resampling.
+    // High-rate input is reduced during capture; lower rates are resampled at finish.
     let capture_rate = captured_sample_rate(in_rate);
     let max_captured_samples = (capture_rate as usize) * (max_seconds as usize);
-    let max_output_samples = (TARGET_SAMPLE_RATE as usize) * (max_seconds as usize);
-    let need_downsample = in_rate > TARGET_SAMPLE_RATE;
-    let downsample_ratio = if need_downsample {
-        Some(in_rate as f64 / TARGET_SAMPLE_RATE as f64)
-    } else {
-        None
-    };
-    let downsample_state = need_downsample.then_some(Arc::new(Mutex::new(DownsampleState {
-        frame_position: 0,
-        next_output_frame: 0.0,
-    })));
-
     std::thread::spawn(move || {
-        let buffer: Arc<Mutex<Vec<f32>>> =
-            Arc::new(Mutex::new(Vec::with_capacity(max_captured_samples)));
-        let cb_buffer = Arc::clone(&buffer);
+        let accumulator = Arc::new(Mutex::new(SampleAccumulator::new(
+            in_rate,
+            in_channels,
+            max_captured_samples,
+        )));
 
         let err_fn = |e| eprintln!("[spiel] audio stream error: {e}");
 
@@ -129,13 +169,7 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
             &device,
             &config,
             sample_format,
-            StreamBuildContext {
-                buffer: cb_buffer,
-                max_samples: max_captured_samples,
-                channels: in_channels,
-                downsample_state,
-                downsample_ratio,
-            },
+            Arc::clone(&accumulator),
             err_fn,
         ) {
             Ok(s) => s,
@@ -168,15 +202,13 @@ pub fn start(max_seconds: u32) -> Result<Recorder> {
                 break;
             }
             // Hard cap reached: stop on our own.
-            if buffer.lock().unwrap().len() >= max_captured_samples {
+            if accumulator.lock().unwrap().is_full() {
                 break;
             }
         }
 
-        let mut collected = std::mem::take(&mut *buffer.lock().unwrap());
-        if collected.len() > max_output_samples {
-            collected.truncate(max_output_samples);
-        }
+        drop(stream);
+        let collected = std::mem::take(&mut accumulator.lock().unwrap().samples);
         let _ = result_tx.send(Ok(collected));
     });
 
@@ -200,82 +232,16 @@ fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     format: SampleFormat,
-    context: StreamBuildContext,
+    accumulator: Arc<Mutex<SampleAccumulator>>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
     macro_rules! input {
         ($t:ty, $to_f32:expr) => {{
-            let buffer = Arc::clone(&context.buffer);
-            let max_samples = context.max_samples;
-            let channels = context.channels;
-            let downsample_state = context.downsample_state.clone();
-            let downsample_ratio = context.downsample_ratio;
+            let accumulator = Arc::clone(&accumulator);
             device.build_input_stream(
                 config,
                 move |data: &[$t], _: &cpal::InputCallbackInfo| {
-                    let mut buf = buffer.lock().unwrap();
-                    if buf.len() >= max_samples {
-                        return;
-                    }
-                    let remaining = max_samples - buf.len();
-
-                    if let Some(ratio) = downsample_ratio {
-                        if let Some(state) = downsample_state.as_ref() {
-                            let mut state = state.lock().unwrap();
-                            if channels <= 1 {
-                                for &raw in data.iter().take(remaining) {
-                                    if (state.frame_position as f64) >= state.next_output_frame {
-                                        buf.push(($to_f32)(raw));
-                                        state.next_output_frame += ratio;
-                                        if buf.len() >= max_samples {
-                                            break;
-                                        }
-                                    }
-                                    state.frame_position = state.frame_position.saturating_add(1);
-                                }
-                            } else {
-                                for frame in data.chunks_exact(channels as usize) {
-                                    let frame_sum: f32 = frame.iter().map(|&s| ($to_f32)(s)).sum();
-                                    let sample = frame_sum / frame.len() as f32;
-                                    if (state.frame_position as f64) >= state.next_output_frame {
-                                        buf.push(sample);
-                                        state.next_output_frame += ratio;
-                                        if buf.len() >= max_samples {
-                                            break;
-                                        }
-                                    }
-                                    state.frame_position = state.frame_position.saturating_add(1);
-                                }
-                            }
-                        } else {
-                            if channels <= 1 {
-                                buf.extend(data.iter().take(remaining).map(|&raw| ($to_f32)(raw)));
-                            } else {
-                                buf.extend(
-                                    data.chunks_exact(channels as usize)
-                                        .take(remaining / channels as usize)
-                                        .map(|frame| {
-                                            let frame_sum: f32 =
-                                                frame.iter().map(|&s| ($to_f32)(s)).sum();
-                                            frame_sum / frame.len() as f32
-                                        }),
-                                );
-                            }
-                        }
-                    } else {
-                        if channels <= 1 {
-                            buf.extend(data.iter().take(remaining).map(|&raw| ($to_f32)(raw)));
-                        } else {
-                            buf.extend(data.chunks_exact(channels as usize).take(remaining).map(
-                                |frame| {
-                                    let frame_sum: f32 = frame.iter().map(|&s| ($to_f32)(s)).sum();
-                                    frame_sum / frame.len() as f32
-                                },
-                            ));
-                        }
-                    }
-                    // Ignore partial frames; this prevents uneven-channel artifacts while
-                    // the callback naturally delivers nearly exact frame boundaries.
+                    accumulator.lock().unwrap().append(data, $to_f32);
                 },
                 err_fn,
                 None,
@@ -292,14 +258,6 @@ fn build_stream(
             input!(f32, |s: f32| s)
         }
     }
-}
-
-struct StreamBuildContext {
-    buffer: Arc<Mutex<Vec<f32>>>,
-    max_samples: usize,
-    channels: u16,
-    downsample_state: Option<Arc<Mutex<DownsampleState>>>,
-    downsample_ratio: Option<f64>,
 }
 
 /// Resample mono audio to `out_rate` using linear interpolation.
@@ -334,6 +292,52 @@ fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accumulator_downmixes_complete_frames_and_stops_at_capacity() {
+        let mut capture = SampleAccumulator::new(16_000, 2, 2);
+        capture.append(&[1.0, 0.0, 0.5], |s| s);
+        capture.append(&[0.2, 0.6, 1.0, 1.0], |s| s);
+        assert_eq!(capture.samples, vec![0.5, 0.4]);
+        assert!(capture.is_full());
+        capture.append(&[0.9, 0.9], |s| s);
+        assert_eq!(capture.samples, vec![0.5, 0.4]);
+    }
+
+    #[test]
+    fn accumulator_consumes_enough_mono_input_to_reach_output_limit() {
+        let mut capture = SampleAccumulator::new(48_000, 1, 3);
+        capture.append(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], |s| s);
+        assert_eq!(capture.samples, vec![0.0, 3.0, 6.0]);
+        assert!(capture.is_full());
+    }
+
+    #[test]
+    fn accumulator_preserves_downsampling_position_between_callbacks() {
+        let samples: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let mut whole = SampleAccumulator::new(44_100, 1, 100);
+        whole.append(&samples, |s| s);
+        let mut chunked = SampleAccumulator::new(44_100, 1, 100);
+        for chunk in samples.chunks(7) {
+            chunked.append(chunk, |s| s);
+        }
+        assert_eq!(chunked.samples, whole.samples);
+        assert_eq!(&chunked.samples[..5], &[0.0, 3.0, 6.0, 9.0, 12.0]);
+    }
+
+    #[test]
+    fn accumulator_converts_and_downmixes_before_returning_mono_audio() {
+        let mut capture = SampleAccumulator::new(48_000, 2, 2);
+        capture.append(&[2_i16, 6, 10, 20, 30, 40, 6, 10], |s| s as f32 / 2.0);
+        assert_eq!(capture.samples, vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn accumulator_preserves_low_rate_samples_for_finish_resampling() {
+        let mut capture = SampleAccumulator::new(8_000, 1, 3);
+        capture.append(&[0.1, 0.2, 0.3, 0.4], |s| s);
+        assert_eq!(capture.samples, vec![0.1, 0.2, 0.3]);
+    }
 
     #[test]
     fn downsample_or_upsample_roughly_preserves_duration() {
